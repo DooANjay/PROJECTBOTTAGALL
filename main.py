@@ -1,559 +1,729 @@
-import asyncio
-import json
-import os
-import random
-import re
-import time
+import os, asyncio, time, json, re, random, html
 from datetime import datetime
-
-from telethon import Button, TelegramClient, events
+from telethon import TelegramClient, events, Button
 from telethon.errors import FloodWaitError
-from telethon.tl.functions.bots import SetBotCommandsRequest
-from telethon.tl.types import BotCommand, BotCommandScopePeer
-
-
-def required_int(name: str) -> int:
-    value = os.environ.get(name)
-    if value is None:
-        raise ValueError(f"Variabel {name} belum diatur")
-    return int(value)
-
 
 try:
-    API_ID = required_int("API_ID")
-    API_HASH = os.environ["API_HASH"]
-    BOT_TOKEN = os.environ["BOT_TOKEN"]
-    OWNER_ID = required_int("OWNER_ID")
-    TARGET_GROUP_ID = required_int("TARGET_GROUP_ID")
-    LOG_GROUP_ID = required_int("LOG_GROUP_ID")
+    API_ID = int(os.environ.get("API_ID"))
+    API_HASH = os.environ.get("API_HASH")
+    BOT_TOKEN = os.environ.get("BOT_TOKEN")
+    OWNER_ID = int(os.environ.get("OWNER_ID"))
+    TARGET_GROUP_ID = int(os.environ.get("TARGET_GROUP_ID"))
+    LOG_GROUP_ID = int(os.environ.get("LOG_GROUP_ID"))
     OWNER_USERNAME = os.environ.get("OWNER_USERNAME", "admin")
-except (KeyError, TypeError, ValueError) as error:
-    print(f"❌ ERROR: Periksa kembali variabel di Railway! ({error})")
-    raise SystemExit(1)
+except (TypeError, ValueError):
+    print("❌ ERROR: Periksa kembali variabel di Railway!")
+    exit(1)
 
-
+bot = TelegramClient('bot_official_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 FILE_DB = "partners_database.json"
-EMOJIS = [
-    "🌟", "🔥", "💎", "🚀", "👏", "⚡", "✨", "🎯", "🔮", "🛸", "🪐",
-    "🧬", "🎨", "🧸", "🦄", "🐼", "🦊", "🍒", "🍇", "🍃", "🍿", "🎵",
-    "🎸", "🎲", "🎰", "🌊", "🎪", "🎭", "🛡️", "🔑", "📦",
-]
-
-bot = TelegramClient("bot_official_session", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
-tagall_queue: asyncio.Queue[dict] = asyncio.Queue()
+tagall_queue = asyncio.Queue()
 is_processing = False
 stop_current_tagall = False
-add_pt_state: dict[int, dict] = {}
 
+add_pt_state = {}
 
-def is_authorized(event) -> bool:
-    return event.sender_id == OWNER_ID or event.chat_id == LOG_GROUP_ID
+# Variabel Emoji Premium
+E_SPARKLE = "<emoji id='5472164874886846699'>✨</emoji>"
+E_CARD    = "<emoji id='5445353829304387411'>💳</emoji>"
+E_ARROW   = "<emoji id='5429651785352501917'>↗️</emoji>"
+E_TIME    = "<emoji id='5382194935057372936'>⏱️</emoji>"
+E_CLOVER  = "<emoji id='5305699699204837855'>🍀</emoji>"
+E_CAL     = "<emoji id='5274055917766202507'>🗓</emoji>"
+E_BOT     = "<emoji id='5226893221191237996'>👾</emoji>"
 
+# Daftar Emoji Premium untuk Mention Tagall
+PREM_MENTION_EMOJIS = [
+    E_SPARKLE,
+    E_CARD,
+    E_ARROW,
+    E_TIME,
+    E_CLOVER,
+    E_CAL,
+    E_BOT
+]
 
-def load_partners() -> dict:
-    if not os.path.exists(FILE_DB):
-        return {}
+def build_log_start(a, b, c, d, e, f):
+    clean_f = html.escape(f).replace('\n', '\n&gt; ')
+    res = (
+        f"&gt; {E_BOT} <b>USER :</b> @{b}\n"
+        f"&gt; {E_CARD} <b>USER ID :</b> <code>{c}</code>\n"
+        f"&gt; {E_TIME} <b>DURASI :</b> 5m\n"
+        f"&gt; {E_CAL} <b>WAKTU :</b> {d}\n"
+        f"&gt; {E_CLOVER} <b>PARTNER :</b> {e}\n\n"
+        f"&gt; {E_SPARKLE} <b>TEKS TAGALL :</b>\n"
+        f"&gt; {clean_f}"
+    )
+    return res
 
-    try:
-        with open(FILE_DB, "r", encoding="utf-8") as file:
-            return json.load(file)
-    except (OSError, json.JSONDecodeError):
-        return {}
+def build_log_done(a, b, c, d, e):
+    clean_e = html.escape(e).replace('\n', '\n&gt; ')
+    res = (
+        f"&gt; {E_BOT} <b>PENGIRIM :</b> {html.escape(a)}\n"
+        f"&gt; {E_ARROW} <b>LINK :</b> {b}\n"
+        f"&gt; {E_SPARKLE} <b>STATUS :</b> {c}\n"
+        f"&gt; {E_CAL} <b>WAKTU SELESAI :</b> {d}\n\n"
+        f"&gt; <b>PESAN TERAKHIR :</b>\n"
+        f"&gt; {clean_e}"
+    )
+    return res
 
+def build_struk(sender_name, partner_name, link, member_count, pj1, pj2, bot_name, ch_link):
+    res = (
+        f"{E_SPARKLE} ✅ <b>Tagall selesai!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"{E_BOT} Pengirim: <b>{html.escape(sender_name)}</b>\n"
+        f"{E_CLOVER} Partner: <b>{html.escape(partner_name.upper())}</b>\n"
+        f"{E_ARROW} Link: {link}\n"
+        f"{E_CARD} Member di-tag: <code>{member_count}</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{E_SPARKLE} <b>Jangan lupa SS hasil tagall-nya!</b>"
+    )
+    return res
 
-def save_partners(data: dict) -> None:
-    with open(FILE_DB, "w", encoding="utf-8") as file:
-        json.dump(data, file, indent=4, ensure_ascii=False)
+def load_partners():
+    if os.path.exists(FILE_DB):
+        try:
+            with open(FILE_DB, "r") as f: return json.load(f)
+        except: return {}
+    return {}
 
+def save_partners(data):
+    with open(FILE_DB, "w") as f: json.dump(data, f, indent=4)
 
 PARTNERS_DICT = load_partners()
-
-
-def build_log_start(username: str, user_id: int, started_at: str, partner: str, text: str) -> str:
-    clean_text = text.replace("\n", "\n> ")
-    return (
-        "🪐 **TAGALL DOO TEST**\n"
-        "📜 **LOG • MENTION STARTED**\n"
-        f"> 👥 **USER:** @{username}\n"
-        f"> 🆔 **USER ID:** `{user_id}`\n"
-        "> ⏳ **DURASI:** 5m\n"
-        f"> ⏰ **WAKTU:** {started_at}\n"
-        f"> 🔮 **PARTNER:** {partner}\n\n"
-        f"> 💬 **TEKS TAGALL:**\n> {clean_text}"
-    )
-
-
-def build_log_done(user_id: int, partner_link: str, group_name: str, total_members: int) -> str:
-    deleted_estimate = int(total_members * 0.2)
-    return (
-        "💫 **LOG • MENTION DONE**\n"
-        f"> 🆔 **USER ID:** `{user_id}`\n"
-        f"> 🔮 **PARTNER:** {partner_link}\n"
-        f"> 🗂️ **GROUP:** **{group_name.upper()}**\n"
-        f"> 📊 **TERKIRIM:** {total_members}\n"
-        f"> 🗑️ **DIHAPUS:** {deleted_estimate}\n"
-        "> ❌ **GAGAL:** 0"
-    )
-
-
-def build_receipt(timestamp: str, group_name: str, partner_link: str, total_members: int) -> str:
-    return (
-        "🟢 **TAGALL SELESAI**\n"
-        f"> 📅 **TANGGAL:** {timestamp}\n"
-        f"> 👥 **GROUP:** **{group_name.upper()}**\n"
-        f"> 🤝 **PARTNER:** {partner_link}\n"
-        f"> 📤 **TERKIRIM:** {total_members}\n"
-        "> ⏳ **DURASI:** 5m\n\n"
-        "💡 LUPA SS? FORWARD PESAN INI SEBAGAI BUKTI TAGALL!"
-    )
-
+print("⚡ Bot Siap!")
 
 def get_menu_buttons():
     return [
         [Button.inline("🚀 Mulai Tagall", data="menu_tagall")],
         [Button.inline("🤝 Minta PT-an (Partner)", data="menu_mitra")],
-        [Button.inline("ℹ️ Info Lainnya", data="menu_info")],
+        [Button.inline("ℹ️ Info Lainnya", data="menu_info")]
     ]
 
-
-def build_partner_page(page: int = 1):
-    keys = list(PARTNERS_DICT)
-    items_per_page = 10
-    total_pages = max(1, (len(keys) + items_per_page - 1) // items_per_page)
-    page = max(1, min(page, total_pages))
-
-    if not keys:
-        return (
-            "💎 **PANEL LAYANAN PARTNER**\n\n> 🧬 STATUS DATABASE: KOSONG!",
-            [
-                [Button.inline("⚡ Tambah PT Baru", data="pt_add_start")],
-                [Button.inline("🔴 Tutup Panel", data="panel_close")],
-            ],
-        )
-
-    start = (page - 1) * items_per_page
-    page_keys = keys[start : start + items_per_page]
-    buttons = []
-    for index, link in enumerate(page_keys, start=start):
-        partner = PARTNERS_DICT[link]
-        name = partner.get("nama", "Tanpa Nama") if isinstance(partner, dict) else partner
-        buttons.append([Button.inline(f"💫 Edit #{index + 1}: {name.upper()}", data=f"pt_manage_{index}")])
-
-    if page < total_pages:
-        buttons.append([Button.inline("🧬 Selanjutnya", data=f"pt_page_{page + 1}")])
-    elif page > 1:
-        buttons.append([Button.inline("🧬 Kembali ke Awal", data="pt_page_1")])
-
-    buttons.extend([
-        [Button.inline("🔮 Preview All (Kirim Semua)", data="pt_preview_all")],
-        [Button.inline("✨ Tambah PT Baru", data="pt_add_start")],
-        [Button.inline("🔴 Tutup Panel", data="panel_close")],
-    ])
-    return f"💎 **PANEL LAYANAN PARTNER**\n\n> HALAMAN AKTIF [{page}/{total_pages}]", buttons
-
-
-async def init_bot_commands():
-    commands = [
-        BotCommand("start", "Memulai bot & melihat menu utama"),
-        BotCommand("help", "Panel kontrol & menu bantuan"),
-        BotCommand("fitur", "Melihat fitur bot dan penggunaannya"),
-        BotCommand("absen", "Membuka panel absensi grup 24 jam"),
-        BotCommand("lpt", "Membuka panel manajemen data partner"),
-        BotCommand("cancel", "Membatalkan input/edit data partner"),
-        BotCommand("end", "Menghentikan proses tagall"),
-    ]
-    try:
-        owner = await bot.get_input_entity(OWNER_ID)
-        await bot(SetBotCommandsRequest(scope=BotCommandScopePeer(owner), commands=commands))
-        print("🌟 Menu perintah berhasil didaftarkan ke Telegram!")
-    except Exception as error:
-        print(f"⚠️ Gagal mendaftarkan menu perintah: {error}")
-
-
-@bot.on(events.NewMessage(pattern=r"(?i)^/start$"))
+@bot.on(events.NewMessage(pattern=r'(?i)^/(start)'))
 async def start_command(event):
-    if event.is_private:
-        await event.respond(
-            "👋 **Halo! Selamat datang di Bot Tagall Official**\n\n"
-            "> Silakan pilih menu layanan di bawah ini untuk memulai.",
-            buttons=get_menu_buttons(),
-        )
+    if not event.is_private: return
+    welcome_text = (
+        f"{E_BOT} <b>Halo! Selamat datang di Bot Tagall Official</b> {E_SPARKLE}\n\n"
+        f"&gt; {E_ARROW} Silakan pilih menu layanan di bawah ini untuk memulai atau mendapatkan informasi lebih lanjut:"
+    )
+    await event.respond(welcome_text, buttons=get_menu_buttons(), parse_mode='html')
 
-
-@bot.on(events.NewMessage(pattern=r"(?i)^/(help|fitur|absen)$"))
-async def dummy_commands(event):
-    if event.is_private:
-        command = event.pattern_match.group(1).lower()
-        await event.respond(f"🛠️ **Menu /{command} sedang aktif dalam mode default sistem.**")
-
-
-@bot.on(events.NewMessage(pattern=r"(?i)^/menu$"))
+@bot.on(events.NewMessage(pattern=r'(?i)^/menu'))
 async def menu_command(event):
-    if event.is_private or event.chat_id == LOG_GROUP_ID:
+    if not event.is_private and event.chat_id != LOG_GROUP_ID: return
+    commands_text = (
+        f"{E_BOT} <b>DAFTAR PERINTAH BOT TAGALL</b>\n\n"
+        f"{E_SPARKLE} <b>Perintah Umum (PM Bot):</b>\n"
+        "&gt; <code>/start</code> - Menampilkan pesan selamat datang dan menu interaktif\n\n"
+        f"{E_CARD} <b>Perintah Admin/Owner (Log Group &amp; PM Bot):</b>\n"
+        "&gt; <code>/menu</code> - Menampilkan daftar perintah ini\n"
+        "&gt; <code>/lpt</code> - Membuka panel manajemen data partner (PT)\n"
+        "&gt; <code>/backup</code> - Mengunduh file cadangan database setelan bot\n"
+        "&gt; <code>/restore</code> - Membalas (reply) file database untuk memulihkan data\n"
+        "&gt; <code>/cancel</code> - Membatalkan proses input/edit partner yang sedang berjalan\n"
+        "&gt; <code>/end</code> - Menghentikan paksa proses tagall yang sedang berlangsung"
+    )
+    await event.respond(commands_text, parse_mode='html')
+
+# FITUR BACKUP DATABASE
+@bot.on(events.NewMessage(pattern=r'(?i)^/backup'))
+async def backup_command(event):
+    if not event.is_private and event.chat_id != LOG_GROUP_ID: return
+    if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID: return
+    
+    if not os.path.exists(FILE_DB) or os.path.getsize(FILE_DB) == 0:
+        return await event.respond("⚠️ <b>Database kosong atau tidak ditemukan!</b>", parse_mode='html')
+    
+    try:
         await event.respond(
-            "📋 **DAFTAR PERINTAH BOT TAGALL**\n\n"
-            "**Perintah Umum (PM Bot):**\n"
-            "> `/start` — Menu interaktif\n\n"
-            "**Perintah Admin/Owner:**\n"
-            "> `/menu`, `/lpt`, `/cancel`, `/end`"
+            f"{E_CARD} <b>BACKUP DATABASE BOT</b>\n\n&gt; {E_CAL} Berikut adalah file cadangan setelan data partner terbaru:",
+            file=FILE_DB,
+            parse_mode='html'
         )
+    except Exception as e:
+        await event.respond(f"❌ Gagal mengirim file backup: <code>{html.escape(str(e))}</code>", parse_mode='html')
 
+# FITUR RESTORE DATABASE
+@bot.on(events.NewMessage(pattern=r'(?i)^/restore'))
+async def restore_command(event):
+    global PARTNERS_DICT
+    if not event.is_private and event.chat_id != LOG_GROUP_ID: return
+    if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID: return
+    
+    reply = await event.get_reply_message()
+    if not reply or not reply.file:
+        return await event.respond("⚠️ <b>Mohon reply (balas) file dokumen backup <code>.json</code></b> yang ingin direstore menggunakan perintah <code>/restore</code>.", parse_mode='html')
+    
+    if not reply.file.name or not reply.file.name.endswith('.json'):
+        return await event.respond("⚠️ File yang direply bukan format <code>.json</code> yang valid!", parse_mode='html')
+    
+    download_path = "temp_restore.json"
+    try:
+        await reply.download_media(file=download_path)
+        
+        with open(download_path, "r", encoding="utf-8") as f:
+            new_data = json.load(f)
+            
+        if not isinstance(new_data, dict):
+            if os.path.exists(download_path): os.remove(download_path)
+            return await event.respond("⚠️ Format struktur data dalam file JSON tidak valid.", parse_mode='html')
+            
+        with open(FILE_DB, "w", encoding="utf-8") as f:
+            json.dump(new_data, f, indent=4)
+            
+        PARTNERS_DICT = load_partners()
+        if os.path.exists(download_path): os.remove(download_path)
+        
+        await event.respond(
+            f"{E_SPARKLE} <b>RESTORE DATABASE BERHASIL!</b>\n\n"
+            f"&gt; {E_CLOVER} Total data partner yang dimuat ulang: <code>{len(PARTNERS_DICT)}</code> data.\n"
+            f"&gt; {E_ARROW} Silakan cek kembali menggunakan <code>/lpt</code>.",
+            parse_mode='html'
+        )
+    except Exception as e:
+        if os.path.exists(download_path): os.remove(download_path)
+        await event.respond(f"❌ Gagal memproses restore database: <code>{html.escape(str(e))}</code>", parse_mode='html')
 
-@bot.on(events.CallbackQuery(pattern=r"^menu_.*"))
+@bot.on(events.CallbackQuery(pattern=r'^menu_.*'))
 async def callback_menu(event):
     data = event.data.decode()
     if data == "menu_tagall":
         text = (
-            "🚀 **Cara Memulai Tagall:**\n\n"
-            "> Kirim pesan berisi Link Partner/Grup yang terdaftar.\n"
-            "> Bot memverifikasi link dan memasukkan pesanan ke antrean."
+            f"{E_ARROW} <b>Cara Memulai Tagall:</b>\n\n"
+            f"&gt; {E_SPARKLE} Cukup kirimkan pesan teks yang berisi <b>Link Partner/Grup</b> yang sudah terdaftar secara resmi di bot ini.\n"
+            "&gt;\n"
+            f"&gt; {E_TIME} Bot akan otomatis memverifikasi link tersebut dan memasukkan pesanan Anda ke dalam antrian."
         )
     elif data == "menu_mitra":
         text = (
-            "🤝 **Pengajuan Kemitraan (PT-an):**\n\n"
-            "> Hubungi owner bot untuk mendaftarkan grup Anda.\n>\n"
-            f"> 👤 **Owner:** @{OWNER_USERNAME}"
+            f"{E_CLOVER} <b>Pengajuan Kemitraan (PT-an):</b>\n\n"
+            "&gt; Untuk mendaftarkan grup Anda sebagai partner resmi, silakan hubungi owner bot melalui username di bawah ini:\n"
+            "&gt;\n"
+            f"&gt; {E_BOT} <b>Owner:</b> @{OWNER_USERNAME}\n"
+            "&gt;\n"
+            f"&gt; {E_CARD} Kirimkan format pendaftaran kepada admin agar link Anda terdata di database sistem."
         )
     elif data == "menu_info":
         text = (
-            "ℹ️ **Informasi Bot & Aturan:**\n\n"
-            "> • Bot menggunakan sistem antrean.\n"
-            "> • Setiap sesi dibatasi maksimal 5 menit.\n"
-            "> • Pesan sesi dibersihkan otomatis."
+            f"{E_SPARKLE} <b>Informasi Bot &amp; Aturan:</b>\n\n"
+            f"&gt; {E_BOT} Bot ini berjalan otomatis menggunakan sistem antrian (Queue).\n"
+            f"&gt; {E_TIME} Setiap sesi tagall dibatasi durasi maksimal 5 menit demi keamanan grup.\n"
+            f"&gt; {E_CAL} Pesan tagall sampah akan otomatis dibersihkan secara berkala oleh bot."
         )
-    else:
-        await event.edit(
-            "👋 **Halo! Selamat datang di Bot Tagall Official**\n\n"
-            "> Silakan pilih menu layanan di bawah ini untuk memulai.",
-            buttons=get_menu_buttons(),
+    elif data == "menu_back":
+        welcome_text = (
+            f"{E_BOT} <b>Halo! Selamat datang di Bot Tagall Official</b> {E_SPARKLE}\n\n"
+            f"&gt; {E_ARROW} Silakan pilih menu layanan di bawah ini untuk memulai atau mendapatkan informasi lebih lanjut:"
         )
+        await event.edit(welcome_text, buttons=get_menu_buttons(), parse_mode='html')
         return
-    await event.edit(text, buttons=[[Button.inline("🔙 Kembali", data="menu_back")]])
+    await event.edit(text, buttons=[[Button.inline("🔙 Kembali", data="menu_back")]], parse_mode='html')
 
-
-@bot.on(events.NewMessage(pattern=r"(?i)^/cancel$"))
+@bot.on(events.NewMessage(pattern=r'(?i)^/cancel'))
 async def cancel_command(event):
-    if not (event.is_private or event.chat_id == LOG_GROUP_ID):
-        return
-    if add_pt_state.pop(event.sender_id, None):
-        await event.respond("> ❌ **Proses penginputan/pengeditan data partner telah dibatalkan.**")
+    if not event.is_private and event.chat_id != LOG_GROUP_ID: return
+    user_id = event.sender_id
+    if user_id in add_pt_state:
+        del add_pt_state[user_id]
+        await event.respond("❌ <b>Proses penginputan/pengeditan data partner telah dibatalkan.</b>", parse_mode='html')
     else:
-        await event.respond("> ⚠️ Tidak ada proses penginputan partner yang sedang aktif.")
+        await event.respond(f"{E_TIME} Tidak ada proses penginputan partner yang sedang aktif.", parse_mode='html')
 
+def build_partner_page(page=1):
+    keys = list(PARTNERS_DICT.keys())
+    total_items = len(keys)
+    items_per_page = 10
+    total_pages = (total_items + items_per_page - 1) // items_per_page
+    if total_pages == 0: total_pages = 1
+    
+    if page < 1: page = 1
+    if page > total_pages: page = total_pages
+    
+    start_idx = (page - 1) * items_per_page
+    end_idx = start_idx + items_per_page
+    page_keys = keys[start_idx:end_idx]
+    
+    if not keys:
+        return (
+            f"{E_CLOVER} <b>PANEL LAYANAN PARTNER</b>\n\n&gt; {E_CARD} Status database: Kosong!", 
+            [[Button.inline("➕ Tambah PT Baru", data="pt_add_start")], [Button.inline("🔴 Tutup Panel", data="panel_close")]]
+        )
+    
+    txt = (
+        f"{E_CLOVER} <b>PANEL LAYANAN PARTNER</b>\n\n"
+        f"&gt; {E_ARROW} Silakan pilih salah satu partner aktif dari list halaman <b>[{page}/{total_pages}]</b> di bawah ini untuk mengelola data:"
+    )
+    buttons = []
+    
+    for i, l in enumerate(page_keys, start=start_idx + 1):
+        p_data = PARTNERS_DICT[l]
+        n = p_data.get("nama", "Tanpa Nama") if isinstance(p_data, dict) else p_data
+        buttons.append([Button.inline(f"{i}. {n.upper()}", data=f"pt_manage_{i-1}")])
+        
+    nav_row = []
+    if page > 1:
+        nav_row.append(Button.inline("◀️", data=f"pt_page_{page-1}"))
+    else:
+        nav_row.append(Button.inline("◀️", data="pt_page_noop"))
+        
+    nav_row.append(Button.inline(f"[{page}/{total_pages}]", data="pt_page_noop"))
+    
+    if page < total_pages:
+        nav_row.append(Button.inline("▶️", data=f"pt_page_{page+1}"))
+    else:
+        nav_row.append(Button.inline("▶️", data="pt_page_noop"))
+        
+    buttons.append(nav_row)
+    buttons.append([Button.inline("➕ Tambah PT Baru", data="pt_add_start")])
+    buttons.append([Button.inline("🔴 Tutup Panel", data="panel_close")])
+    
+    return txt, buttons
 
-@bot.on(events.NewMessage(pattern=r"(?i)^/lpt$"))
+@bot.on(events.NewMessage(pattern=r'(?i)^/lpt'))
 async def list_partner(event):
-    if is_authorized(event):
-        text, buttons = build_partner_page()
-        await event.respond(text, buttons=buttons, link_preview=False)
+    if not event.is_private and event.chat_id != LOG_GROUP_ID: return
+    if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID: return
+    txt, buttons = build_partner_page(1)
+    await event.respond(txt, buttons=buttons, link_preview=False, parse_mode='html')
 
-
-async def require_access(event) -> bool:
-    if is_authorized(event):
-        return True
-    await event.answer("⚠️ Tidak ada akses!", alert=True)
-    return False
-
-
-@bot.on(events.CallbackQuery(pattern=r"^pt_page_\d+$"))
+@bot.on(events.CallbackQuery(pattern=r'^pt_page_.*'))
 async def callback_pt_page(event):
-    if await require_access(event):
-        page = int(event.data.decode().rsplit("_", 1)[1])
-        text, buttons = build_partner_page(page)
-        await event.edit(text, buttons=buttons, link_preview=False)
+    if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID:
+        return await event.answer("⚠️ Tidak ada akses!", alert=True)
+    parts = event.data.decode().split('_')
+    data = parts[2]
+    if data == "noop": return await event.answer()
+    page = int(data)
+    txt, buttons = build_partner_page(page)
+    await event.edit(txt, buttons=buttons, link_preview=False, parse_mode='html')
 
-
-@bot.on(events.CallbackQuery(pattern=r"^panel_close$"))
+@bot.on(events.CallbackQuery(pattern=r'^panel_close$'))
 async def callback_panel_close(event):
-    if await require_access(event):
-        await event.edit("> 🔒 Panel layanan partner telah ditutup.", buttons=None)
+    if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID:
+        return await event.answer("⚠️ Tidak ada akses!", alert=True)
+    await event.edit(f"&gt; {E_BOT} <b>Panel layanan partner telah ditutup.</b>", buttons=None, parse_mode='html')
 
-
-@bot.on(events.CallbackQuery(pattern=r"^pt_preview_all$"))
-async def callback_preview_all(event):
-    await event.answer("🛠️ Fitur Kirim Semua sedang dalam pengembangan!", alert=True)
-
-
-@bot.on(events.CallbackQuery(pattern=r"^pt_back_list$"))
-async def callback_pt_back_list(event):
-    if await require_access(event):
-        text, buttons = build_partner_page()
-        await event.edit(text, buttons=buttons, link_preview=False)
-
-
-@bot.on(events.CallbackQuery(pattern=r"^pt_manage_\d+$"))
+@bot.on(events.CallbackQuery(pattern=r'^pt_manage_\d+$'))
 async def callback_manage_partner(event):
-    if not await require_access(event):
-        return
-    index = int(event.data.decode().rsplit("_", 1)[1])
-    keys = list(PARTNERS_DICT)
-    if not 0 <= index < len(keys):
-        return
-    link = keys[index]
-    data = PARTNERS_DICT[link]
-    if not isinstance(data, dict):
-        data = {"nama": data, "bot": "-", "ch": "-", "pj1": "-", "pj2": "-"}
-    text = (
-        "⚙️ **PILIH BAGIAN YANG INGIN DIUBAH:**\n\n"
-        f"> 🏢 **NAMA GC:** {data.get('nama', '-')}\n"
-        f"> 🔗 **LINK GC:** {link}\n"
-        f"> 🤖 **NAMA BOT:** {data.get('bot', '-')}\n"
-        f"> 📢 **LINK CH:** {data.get('ch', '-')}\n"
-        f"> 👮 **PJ 1:** {data.get('pj1', '-')}\n"
-        f"> 👮 **PJ 2:** {data.get('pj2', '-')}"
-    )
-    buttons = [
-        [Button.inline("👆 Edit Nama GC", data=f"pt_edit_nama_{index}"), Button.inline("👆 Edit Link GC", data=f"pt_edit_link_{index}")],
-        [Button.inline("👆 Edit Bot", data=f"pt_edit_bot_{index}"), Button.inline("👆 Edit CH", data=f"pt_edit_ch_{index}")],
-        [Button.inline("👆 Edit PJ 1", data=f"pt_edit_pj1_{index}"), Button.inline("👆 Edit PJ 2", data=f"pt_edit_pj2_{index}")],
-        [Button.inline("🔴 Hapus Partner", data=f"pt_delconf_{index}"), Button.inline("❌ Kembali", data="pt_back_list")],
-        [Button.inline("🔴 Tutup Panel", data="panel_close")],
-    ]
-    await event.edit(text, buttons=buttons, link_preview=False)
+    if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID:
+        return await event.answer("⚠️ Tidak ada akses!", alert=True)
+    parts = event.data.decode().split('_')
+    idx = int(parts[2])
+    keys = list(PARTNERS_DICT.keys())
+    if 0 <= idx < len(keys):
+        l = keys[idx]
+        pd = PARTNERS_DICT[l]
+        if not isinstance(pd, dict):
+            pd = {"nama": pd, "bot": "-", "ch": "-", "pj1": "-", "pj2": "-"}
+            
+        txt = (
+            f"{E_SPARKLE} <b>PILIH BAGIAN YANG INGIN DIUBAH:</b>\n\n"
+            f"&gt; {E_CLOVER} <b>Nama GC :</b> {html.escape(str(pd.get('nama', '-')))}\n"
+            f"&gt; {E_ARROW} <b>Link GC :</b> {l}\n"
+            f"&gt; {E_BOT} <b>Nama Bot :</b> {html.escape(str(pd.get('bot', '-')))}\n"
+            f"&gt; {E_CARD} <b>Link CH :</b> {html.escape(str(pd.get('ch', '-')))}\n"
+            f"&gt; 👮 <b>PJ 1 :</b> {html.escape(str(pd.get('pj1', '-')))}\n"
+            f"&gt; 👮 <b>PJ 2 :</b> {html.escape(str(pd.get('pj2', '-')))}"
+        )
+        buttons = [
+            [Button.inline("👆 Edit Nama GC", data=f"pt_edit_nama_{idx}"), Button.inline("👆 Edit Link GC", data=f"pt_edit_link_{idx}")],
+            [Button.inline("👆 Edit Bot", data=f"pt_edit_bot_{idx}"), Button.inline("👆 Edit CH", data=f"pt_edit_ch_{idx}")],
+            [Button.inline("👆 Edit PJ 1", data=f"pt_edit_pj1_{idx}"), Button.inline("👆 Edit PJ 2", data=f"pt_edit_pj2_{idx}")],
+            [Button.inline("🔴 Hapus Partner", data=f"pt_delconf_{idx}"), Button.inline("❌ Kembali", data="pt_back_list")],
+            [Button.inline("🔴 Tutup Panel", data="panel_close")]
+        ]
+        await event.edit(txt, buttons=buttons, link_preview=False, parse_mode='html')
 
+@bot.on(events.CallbackQuery(pattern=r'^pt_back_list$'))
+async def callback_pt_back_list(event):
+    if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID:
+        return await event.answer("⚠️ Tidak ada akses!", alert=True)
+    txt, buttons = build_partner_page(1)
+    await event.edit(txt, buttons=buttons, link_preview=False, parse_mode='html')
 
-@bot.on(events.CallbackQuery(pattern=r"^pt_delconf_\d+$"))
+@bot.on(events.CallbackQuery(pattern=r'^pt_delconf_\d+$'))
 async def callback_delconf_partner(event):
-    if not await require_access(event):
-        return
-    index = int(event.data.decode().rsplit("_", 1)[1])
-    keys = list(PARTNERS_DICT)
-    if not 0 <= index < len(keys):
-        return
-    data = PARTNERS_DICT[keys[index]]
-    name = data.get("nama", "Tanpa Nama") if isinstance(data, dict) else data
-    text = f"⚠️ **KONFIRMASI PENGHAPUSAN**\n\n> Hapus partner '{name.upper()}' secara permanen?"
-    buttons = [
-        [Button.inline("✅ Ya, Hapus", data=f"pt_delfinal_{index}")],
-        [Button.inline("❌ Batalkan", data=f"pt_manage_{index}")],
-    ]
-    await event.edit(text, buttons=buttons)
+    if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID:
+        return await event.answer("⚠️ Tidak ada akses!", alert=True)
+    parts = event.data.decode().split('_')
+    idx = int(parts[2])
+    keys = list(PARTNERS_DICT.keys())
+    if 0 <= idx < len(keys):
+        l = keys[idx]
+        p_data = PARTNERS_DICT[l]
+        n = p_data.get("nama", p_data) if isinstance(p_data, dict) else p_data
+        txt = (
+            "⚠️ <b>KONFIRMASI PENGHAPUSAN</b>\n\n"
+            f"&gt; Apakah Anda yakin ingin menghapus partner '<b>{html.escape(n.upper())}</b>' dari database secara permanen?"
+        )
+        buttons = [
+            [Button.inline("✅ Ya, Hapus", data=f"pt_delfinal_{idx}")],
+            [Button.inline("❌ Batalkan", data=f"pt_manage_{idx}")]
+        ]
+        await event.edit(txt, buttons=buttons, parse_mode='html')
 
-
-@bot.on(events.CallbackQuery(pattern=r"^pt_delfinal_\d+$"))
+@bot.on(events.CallbackQuery(pattern=r'^pt_delfinal_\d+$'))
 async def callback_delfinal_partner(event):
-    if not await require_access(event):
-        return
-    index = int(event.data.decode().rsplit("_", 1)[1])
-    keys = list(PARTNERS_DICT)
-    if not 0 <= index < len(keys):
-        return
-    data = PARTNERS_DICT.pop(keys[index])
-    name = data.get("nama", "Tanpa Nama") if isinstance(data, dict) else data
-    save_partners(PARTNERS_DICT)
-    await event.answer(f"🗑️ {name.upper()} berhasil dihapus!", alert=True)
-    text, buttons = build_partner_page()
-    await event.edit(text, buttons=buttons, link_preview=False)
+    global PARTNERS_DICT
+    if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID:
+        return await event.answer("⚠️ Tidak ada akses!", alert=True)
+    parts = event.data.decode().split('_')
+    idx = int(parts[2])
+    keys = list(PARTNERS_DICT.keys())
+    if 0 <= idx < len(keys):
+        removed_name = PARTNERS_DICT[keys[idx]]
+        if isinstance(removed_name, dict):
+            removed_name = removed_name.get("nama", "Tanpa Nama")
+        del PARTNERS_DICT[keys[idx]]
+        save_partners(PARTNERS_DICT)
+        await event.answer(f"🗑️ {removed_name.upper()} Berhasil Dihapus!", alert=True)
+    txt, buttons = build_partner_page(1)
+    await event.edit(txt, buttons=buttons, link_preview=False, parse_mode='html')
 
-
-EDIT_LABELS = {
-    "nama": "Nama Grup (GC) baru",
-    "link": "Link Grup (GC) baru berawalan http/t.me",
-    "bot": "Nama Bot baru",
-    "ch": "Link Channel (CH) baru",
-    "pj1": "Username Penanggung Jawab 1 (PJ 1) baru",
-    "pj2": "Username Penanggung Jawab 2 (PJ 2) baru",
-}
-
-
-@bot.on(events.CallbackQuery(pattern=r"^pt_edit_(nama|link|bot|ch|pj1|pj2)_\d+$"))
+@bot.on(events.CallbackQuery(pattern=r'^pt_edit_(nama|link|bot|ch|pj1|pj2)_\d+$'))
 async def callback_trigger_edit(event):
-    if not await require_access(event):
-        return
-    _, _, field, raw_index = event.data.decode().split("_", 3)
-    add_pt_state[event.sender_id] = {"step": f"edit_{field}", "idx": int(raw_index)}
-    await event.respond(
-        "📝 **MODE EDIT DATA PARTNER**\n\n"
-        f"> Kirimkan {EDIT_LABELS[field]} melalui chat.\n"
-        "> Ketik /cancel untuk membatalkan."
+    if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID:
+        return await event.answer("⚠️ Tidak ada akses!", alert=True)
+    parts = event.data.decode().split('_')
+    tipe = parts[2]
+    idx = int(parts[3])
+    
+    add_pt_state[event.sender_id] = {"step": f"edit_{tipe}", "idx": idx}
+    
+    field_labels = {
+        'nama': 'Nama Grup (GC) baru',
+        'link': 'Link Grup (GC) baru berawalan http/t.me',
+        'bot': 'Nama Bot baru',
+        'ch': 'Link Channel (CH) baru',
+        'pj1': 'Username Penanggung Jawab 1 (PJ 1) baru',
+        'pj2': 'Username Penanggung Jawab 2 (PJ 2) baru'
+    }
+    
+    txt = (
+        f"{E_CARD} <b>MODE EDIT DATA PARTNER</b>\n\n"
+        f"&gt; {E_ARROW} Silakan kirimkan data <b>{field_labels[tipe]}</b> melalui pesan chat untuk memperbarui partner ini.\n"
+        f"&gt; <i>Ketik /cancel jika ingin membatalkan.</i>"
     )
+    await event.respond(txt, parse_mode='html')
     await event.answer()
 
-
-@bot.on(events.CallbackQuery(pattern=r"^pt_add_start$"))
+@bot.on(events.CallbackQuery(pattern=r'^pt_add_start$'))
 async def callback_add_start(event):
-    if await require_access(event):
-        add_pt_state[event.sender_id] = {"step": "input_nama"}
-        await event.respond(
-            "➕ **TAMBAH PARTNER BARU (TAHAP 1/6)**\n\n"
-            "> Masukkan Nama Partner (PT / Nama GC):\n> Ketik /cancel untuk membatalkan."
-        )
-        await event.answer()
-
-
-def valid_link(value: str) -> bool:
-    return value.startswith(("http://", "https://", "t.me/"))
-
+    if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID:
+        return await event.answer("⚠️ Tidak ada akses!", alert=True)
+    add_pt_state[event.sender_id] = {"step": "input_nama"}
+    txt = (
+        f"{E_CLOVER} <b>TAMBAH PARTNER BARU (TAHAP 1/6)</b>\n\n"
+        f"&gt; {E_ARROW} Silakan masukkan <b>Nama Partner (PT / Nama GC)</b>:\n"
+        "&gt; <i>Ketik /cancel jika ingin membatalkan.</i>"
+    )
+    await event.respond(txt, parse_mode='html')
+    await event.answer()
 
 @bot.on(events.NewMessage(incoming=True))
 async def handle_multistep_input(event):
-    if not (event.is_private or event.chat_id == LOG_GROUP_ID):
-        return
+    global PARTNERS_DICT
+    if not event.is_private and event.chat_id != LOG_GROUP_ID: return
     user_id = event.sender_id
-    if user_id not in add_pt_state or not event.raw_text:
-        return
-    text = event.raw_text.strip()
-    if text.startswith("/cancel"):
-        return
-
+    if user_id not in add_pt_state: return
+    
+    user_text = event.text.strip()
+    if user_text.startswith("/cancel"): return
+    
     state = add_pt_state[user_id]
-    step = state["step"]
-    input_steps = {
-        "input_nama": ("nama", "input_link", "➕ **TAMBAH PARTNER BARU (TAHAP 2/6)**\n\n> Masukkan Link Partner (Link GC):"),
-        "input_bot": ("bot", "input_ch", "➕ **TAMBAH PARTNER BARU (TAHAP 4/6)**\n\n> Masukkan Link Channel (CH):"),
-        "input_ch": ("ch", "input_pj1", "➕ **TAMBAH PARTNER BARU (TAHAP 5/6)**\n\n> Masukkan Username PJ 1:"),
-        "input_pj1": ("pj1", "input_pj2", "➕ **TAMBAH PARTNER BARU (TAHAP 6/6)**\n\n> Masukkan Username PJ 2:"),
-    }
-    if step in input_steps:
-        field, next_step, prompt = input_steps[step]
-        state[field] = text
-        state["step"] = next_step
-        await event.respond(prompt)
-        return
-
-    if step == "input_link":
-        if not valid_link(text):
-            await event.respond("> ⚠️ Link tidak valid. Harus diawali http atau t.me.")
-        elif text in PARTNERS_DICT:
-            await event.respond("> ⚠️ Link tersebut sudah terdaftar.")
-        else:
-            state["link"] = text
-            state["step"] = "input_bot"
-            await event.respond("➕ **TAMBAH PARTNER BARU (TAHAP 3/6)**\n\n> Masukkan Nama Bot pendukung:")
-        return
-
-    if step == "input_pj2":
-        state["pj2"] = text
-        PARTNERS_DICT[state["link"]] = {key: state[key] for key in ("nama", "bot", "ch", "pj1", "pj2")}
+    step = state.get("step")
+    
+    if step == "input_nama":
+        state["nama"] = user_text
+        state["step"] = "input_link"
+        txt = (
+            f"{E_CLOVER} <b>TAMBAH PARTNER BARU (TAHAP 2/6)</b>\n\n"
+            f"&gt; {E_ARROW} Masukkan <b>Link Partner (Link GC)</b> berawalan http atau t.me:"
+        )
+        await event.respond(txt, parse_mode='html')
+        
+    elif step == "input_link":
+        if not user_text.startswith(("http", "t.me")):
+            return await event.respond("&gt; ⚠️ Link tidak valid! Harus diawali http atau t.me. Silakan kirim ulang:", parse_mode='html')
+        if user_text in PARTNERS_DICT:
+            return await event.respond("&gt; ⚠️ Link tersebut sudah terdaftar! Silakan kirim link lain:", parse_mode='html')
+        state["link"] = user_text
+        state["step"] = "input_bot"
+        txt = (
+            f"{E_CLOVER} <b>TAMBAH PARTNER BARU (TAHAP 3/6)</b>\n\n"
+            f"&gt; {E_BOT} Masukkan <b>Nama Bot</b> pendukung:"
+        )
+        await event.respond(txt, parse_mode='html')
+        
+    elif step == "input_bot":
+        state["bot"] = user_text
+        state["step"] = "input_ch"
+        txt = (
+            f"{E_CLOVER} <b>TAMBAH PARTNER BARU (TAHAP 4/6)</b>\n\n"
+            f"&gt; {E_CARD} Masukkan <b>Link Channel (CH)</b>:"
+        )
+        await event.respond(txt, parse_mode='html')
+        
+    elif step == "input_ch":
+        state["ch"] = user_text
+        state["step"] = "input_pj1"
+        txt = (
+            f"{E_CLOVER} <b>TAMBAH PARTNER BARU (TAHAP 5/6)</b>\n\n"
+            "&gt; 👮 Masukkan Username <b>Penanggung Jawab 1 (PJ 1)</b>:"
+        )
+        await event.respond(txt, parse_mode='html')
+        
+    elif step == "input_pj1":
+        state["pj1"] = user_text
+        state["step"] = "input_pj2"
+        txt = (
+            f"{E_CLOVER} <b>TAMBAH PARTNER BARU (TAHAP 6/6 - TERAKHIR)</b>\n\n"
+            "&gt; 👮 Masukkan Username <b>Penanggung Jawab 2 (PJ 2)</b>:"
+        )
+        await event.respond(txt, parse_mode='html')
+        
+    elif step == "input_pj2":
+        state["pj2"] = user_text
+        
+        PARTNERS_DICT[state["link"]] = {
+            "nama": state["nama"],
+            "bot": state["bot"],
+            "ch": state["ch"],
+            "pj1": state["pj1"],
+            "pj2": state["pj2"]
+        }
         save_partners(PARTNERS_DICT)
         del add_pt_state[user_id]
-        await event.respond(f"✅ **PARTNER BERHASIL DITAMBAHKAN!**\n\n> NAMA GC: {state['nama']}\n> LINK GC: {state['link']}")
-        return
+        
+        txt_done = (
+            f"{E_SPARKLE} <b>PARTNER BERHASIL DITAMBAHKAN!</b>\n\n"
+            f"&gt; {E_CLOVER} <b>Nama GC :</b> {html.escape(state['nama'])}\n"
+            f"&gt; {E_ARROW} <b>Link GC :</b> {state['link']}\n"
+            f"&gt; {E_BOT} <b>Bot :</b> {html.escape(state['bot'])}\n"
+            f"&gt; {E_CARD} <b>CH :</b> {html.escape(state['ch'])}\n"
+            f"&gt; 👮 <b>PJ 1 :</b> {html.escape(state['pj1'])}\n"
+            f"&gt; 👮 <b>PJ 2 :</b> {html.escape(state['pj2'])}\n\n"
+            f"Silakan panggil kembali <code>/lpt</code> untuk melihat list."
+        )
+        await event.respond(txt_done, parse_mode='html')
 
-    if not step.startswith("edit_"):
-        return
-    field = step.removeprefix("edit_")
-    index = state["idx"]
-    keys = list(PARTNERS_DICT)
-    if not 0 <= index < len(keys):
-        del add_pt_state[user_id]
-        await event.respond("> ⚠️ Data partner sudah tidak ditemukan.")
-        return
-    old_link = keys[index]
-    data = PARTNERS_DICT[old_link]
-    if not isinstance(data, dict):
-        data = {"nama": data, "bot": "-", "ch": "-", "pj1": "-", "pj2": "-"}
-    if field == "link":
-        if not valid_link(text):
-            await event.respond("> ⚠️ Link tidak valid. Harus diawali http atau t.me.")
-            return
-        if text != old_link and text in PARTNERS_DICT:
-            await event.respond("> ⚠️ Link tersebut sudah terdaftar.")
-            return
-        del PARTNERS_DICT[old_link]
-        PARTNERS_DICT[text] = data
-    else:
-        data[field] = text
-        PARTNERS_DICT[old_link] = data
-    save_partners(PARTNERS_DICT)
-    del add_pt_state[user_id]
-    await event.respond(f"✅ **PERUBAHAN BERHASIL DISIMPAN!**\n\n> Data {field.upper()} berhasil dimodifikasi.")
+    elif step.startswith("edit_"):
+        parts = step.split("_")
+        tipe = parts[1]
+        idx = state["idx"]
+        keys = list(PARTNERS_DICT.keys())
+        
+        if 0 <= idx < len(keys):
+            old_link = keys[idx]
+            old_data = PARTNERS_DICT[old_link]
+            
+            if not isinstance(old_data, dict):
+                old_data = {"nama": old_data, "bot": "-", "ch": "-", "pj1": "-", "pj2": "-"}
+                
+            if tipe == "link":
+                if not user_text.startswith(("http", "t.me")):
+                    return await event.respond("&gt; ⚠️ Link tidak valid! Harus diawali http atau t.me. Silakan kirim ulang:", parse_mode='html')
+                if user_text != old_link and user_text in PARTNERS_DICT:
+                    return await event.respond("&gt; ⚠️ Link tersebut sudah terdaftar! Silakan kirim link lain:", parse_mode='html')
+                del PARTNERS_DICT[old_link]
+                PARTNERS_DICT[user_text] = old_data
+            else:
+                old_data[tipe] = user_text
+                PARTNERS_DICT[old_link] = old_data
+                
+            save_partners(PARTNERS_DICT)
+            del add_pt_state[user_id]
+            
+            txt_success = (
+                f"{E_SPARKLE} <b>PERUBAHAN BERHASIL DISIMPAN!</b>\n\n"
+                f"&gt; {E_CARD} Data <b>{tipe.upper()}</b> berhasil dimodifikasi. Silakan panggil ulang perintah <code>/lpt</code> untuk melihat pembaruan."
+            )
+            await event.respond(txt_success, parse_mode='html')
 
-
-@bot.on(events.NewMessage(pattern=r"(?i)^/end$"))
+@bot.on(events.NewMessage(pattern=r'(?i)^/end'))
 async def end_tagall(event):
-    global stop_current_tagall
-    if not is_authorized(event):
-        return
+    if not event.is_private and event.chat_id != LOG_GROUP_ID: return
+    if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID: return
+    global stop_current_tagall, is_processing
     if not is_processing:
-        await event.respond("> ⚠️ Tidak ada proses tagall yang sedang berjalan.")
-        return
+        return await event.respond(f"&gt; {E_TIME} Tidak ada proses tagall yang sedang berjalan.", parse_mode='html')
     stop_current_tagall = True
-    await event.respond("> 🛑 Menghentikan proses tagall saat ini...")
-
-
-async def clean_delayed(message_ids: list[int]):
-    await asyncio.sleep(300)
-    try:
-        await bot.delete_messages(TARGET_GROUP_ID, message_ids)
-        await bot.send_message(OWNER_ID, f"> 🧹 BERSIH: {len(message_ids)} pesan dihapus!")
-    except Exception:
-        pass
-
+    await event.respond("&gt; 🛑 Menghentikan proses tagall saat ini...", parse_mode='html')
 
 async def process_queue():
     global is_processing, stop_current_tagall
     is_processing = True
-    try:
-        while not tagall_queue.empty():
-            task = await tagall_queue.get()
-            stop_current_tagall = False
-            message_ids = []
+    while not tagall_queue.empty():
+        task = await tagall_queue.get()
+        pemicu, teks, mitra, nama_pt, nama, user = task['p'], task['t'], task['m'], task['pt'], task['n'], task['u']
+        v_bot, v_ch, v_pj1, v_pj2 = task['bot'], task['ch'], task['pj1'], task['pj2']
+        
+        stop_current_tagall = False
+        try:
+            await bot.send_message(pemicu, f"&gt; {E_ARROW} <b>GILIRAN ANDA DIMULAI!</b> {E_SPARKLE}", parse_mode='html')
+        except: pass
+        
+        first_tag_id = None
+        try:
+            chat = await bot.get_entity(TARGET_GROUP_ID)
+            i_msg = await bot.send_message(TARGET_GROUP_ID, f"{E_SPARKLE} <b>TAGALL DIMULAI</b>\n{E_BOT} <b>GROUP:</b> {html.escape(chat.title)}", link_preview=False, parse_mode='html')
+            ids = [i_msg.id]
+            first_tag_id = i_msg.id
+        except:
+            tagall_queue.task_done()
+            continue
+            
+        w_start = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_start = build_log_start(nama, user, pemicu, w_start, mitra, teks)
+        try:
+            await bot.send_message(LOG_GROUP_ID, log_start, parse_mode='html', link_preview=False)
+        except: pass
+        
+        mentions = []
+        try:
+            async for u in bot.iter_participants(TARGET_GROUP_ID):
+                if not u.bot:
+                    # Menggunakan emoji premium sebagai link mention di grup
+                    prem_icon = random.choice(PREM_MENTION_EMOJIS)
+                    mentions.append(f'<a href="tg://user?id={u.id}">{prem_icon}</a>')
+        except: pass
+        
+        if not mentions:
+            tagall_queue.task_done()
+            continue
+            
+        chunks = [mentions[i:i + 10] for i in range(0, len(mentions), 10)]
+        t_start = time.time()
+        l_sent = False
+        w_habis = False
+        
+        # Teks pesan tagall dilengkapi header emoji premium
+        safe_teks = html.escape(teks)
+        header_tagall = f"{E_SPARKLE} <b>INFO PARTNER ({html.escape(nama_pt.upper())})</b> {E_CLOVER}\n\n{safe_teks}\n\n{E_ARROW} "
+        
+        for chunk in chunks:
+            if stop_current_tagall:
+                break
+            selisih = int(time.time() - t_start)
+            if selisih not in range(0, 300):
+                w_habis = True
+                break
+            
+            pesan_kirim = header_tagall + " ".join(chunk)
             try:
-                await bot.send_message(task["p"], "> 🚀 GILIRAN ANDA DIMULAI!")
-                chat = await bot.get_entity(TARGET_GROUP_ID)
-                group_name = getattr(chat, "title", "Target Group")
-                start = await bot.send_message(TARGET_GROUP_ID, f"🚀 TAGALL DIMULAI\n👥 GROUP: {group_name}")
-                message_ids.append(start.id)
-                await bot.send_message(
-                    LOG_GROUP_ID,
-                    build_log_start(task["u"], task["p"], datetime.now().strftime("%d-%m-%Y %H:%M"), task["m"], task["t"]),
-                    parse_mode="md",
-                    link_preview=False,
-                )
-                markers = []
-                async for participant in bot.iter_participants(TARGET_GROUP_ID):
-                    if not participant.bot:
-                        markers.append(random.choice(EMOJIS))
-                started_at = time.monotonic()
-                for offset in range(0, len(markers), 10):
-                    if stop_current_tagall or time.monotonic() - started_at >= 300:
-                        break
-                    try:
-                        sent = await bot.send_message(TARGET_GROUP_ID, f"{task['t']}\n\n{' '.join(markers[offset:offset + 10])}", parse_mode="md")
-                        message_ids.append(sent.id)
-                    except FloodWaitError as error:
-                        await asyncio.sleep(error.seconds + 1)
-                    await asyncio.sleep(1.2)
-                status = "Dihentikan Paksa (/end)" if stop_current_tagall else "Selesai"
-                finished = await bot.send_message(TARGET_GROUP_ID, f"✅ {status}! Pesan akan dihapus dalam 5 menit.")
-                message_ids.append(finished.id)
-                await bot.send_message(LOG_GROUP_ID, build_log_done(task["p"], task["m"], task["pt"], len(markers)), parse_mode="md")
-                await bot.send_message(task["p"], build_receipt(datetime.now().strftime("%d-%m-%Y %H:%M"), group_name, task["m"], len(markers)), parse_mode="md")
-                asyncio.create_task(clean_delayed(message_ids))
-            except Exception as error:
-                print(f"Gagal memproses antrean: {error}")
-            finally:
-                tagall_queue.task_done()
-    finally:
-        is_processing = False
+                m_tag = await bot.send_message(TARGET_GROUP_ID, pesan_kirim, parse_mode='html', link_preview=False)
+                ids.append(m_tag.id)
+            except FloodWaitError as e:
+                await asyncio.sleep(e.seconds + 1)
+                try:
+                    m_tag = await bot.send_message(TARGET_GROUP_ID, pesan_kirim, parse_mode='html', link_preview=False)
+                    ids.append(m_tag.id)
+                except: pass
+            except: pass
+            
+            await asyncio.sleep(1.2)
+            
+            if selisih not in range(0, 60) and not l_sent:
+                try:
+                    await bot.send_message(pemicu, f"&gt; {E_TIME} <b>BERJALAN 1 MENIT!</b>", parse_mode='html')
+                    l_sent = True
+                except: pass
+                
+        durasi = round((time.time() - t_start) / 60)
+        t_txt = "Dihentikan Paksa (/end)" if stop_current_tagall else ("Selesai (Limit 5m)" if w_habis else "Selesai")
+        
+        try:
+            s_msg = await bot.send_message(TARGET_GROUP_ID, f"{E_SPARKLE} <b>{t_txt}!</b> {E_TIME} Pesan sampah dihapus dalam 5 menit...", parse_mode='html')
+            ids.append(s_msg.id)
+        except: pass
+        
+        w_end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_done = build_log_done(nama, mitra, t_txt, w_end, teks)
+        try:
+            await bot.send_message(LOG_GROUP_ID, log_done, parse_mode='html', link_preview=False)
+        except: pass
+        
+        clean_group_id = str(TARGET_GROUP_ID).replace('-100', '')
+        link_ke_grup_anda = f"https://t.me/c/{clean_group_id}/{first_tag_id}" if first_tag_id else mitra
+        struk = build_struk(nama, nama_pt, mitra, len(mentions), v_pj1, v_pj2, v_bot, v_ch)
+        try:
+            await bot.send_message(
+                pemicu, 
+                struk, 
+                parse_mode='html', 
+                link_preview=True, 
+                buttons=[
+                    [Button.url("Lihat Hasil ↗️", url=link_ke_grup_anda)]
+                ]
+            )
+        except: pass
+        
+        tagall_queue.task_done()
+        asyncio.create_task(clean_delayed(ids))
+    is_processing = False
 
+async def clean_delayed(ids):
+    await asyncio.sleep(300)
+    try:
+        await bot.delete_messages(TARGET_GROUP_ID, ids)
+        await bot.send_message(OWNER_ID, f"&gt; {E_SPARKLE} <b>BERSIH:</b> {len(ids)} pesan dihapus!", parse_mode='html')
+    except: pass
 
 @bot.on(events.NewMessage(incoming=True))
 async def handle_public_auto_tagall(event):
-    global is_processing
-    if not event.is_private or not event.raw_text or event.raw_text.startswith("/"):
-        return
-    if event.sender_id in add_pt_state:
-        return
-    urls = re.findall(r"(?:https?://\S+|t\.me/\S+)", event.raw_text)
-    link = next((url.rstrip(".,;)") for url in urls if url.rstrip(".,;)") in PARTNERS_DICT), None)
-    if not link:
-        await event.respond("❌ **LINK TIDAK TERDAFTAR**\n\n> Link belum terdata sebagai mitra resmi.")
-        return
-    partner = PARTNERS_DICT[link]
-    name = partner.get("nama", "Tanpa Nama") if isinstance(partner, dict) else partner
-    sender = await event.get_sender()
-    queue_position = tagall_queue.qsize() + 1
-    await tagall_queue.put({"p": event.sender_id, "t": event.raw_text, "m": link, "pt": name, "u": sender.username or "tidak_ada"})
+    if not event.is_private or event.text.startswith("/"): return
+    if event.sender_id in add_pt_state: return
+    
+    urls = re.findall(r'(https?://\S+|t\.me/\S+)', event.text)
+    if not urls: return
+    v_link, v_name, v_bot, v_ch, v_pj1, v_pj2 = "", "", "", "", "", ""
+    for url in urls:
+        clean = url.strip().rstrip(".,;)")
+        if clean in PARTNERS_DICT:
+            v_link = clean
+            pd = PARTNERS_DICT[clean]
+            if isinstance(pd, dict):
+                v_name = pd.get('nama', 'Tanpa Nama')
+                v_bot = pd.get('bot', '-')
+                v_ch = pd.get('ch', '-')
+                v_pj1 = pd.get('pj1', '-')
+                v_pj2 = pd.get('pj2', '-')
+            else:
+                v_name = pd
+                v_bot, v_ch, v_pj1, v_pj2 = "-", "-", "-", "-"
+            break
+            
+    if not v_link:
+        return await event.respond(
+            "❌ <b>LINK TIDAK TERDAFTAR</b>\n\n"
+            f"&gt; {E_CLOVER} Mohon maaf, link yang Anda kirimkan belum terdata sebagai mitra resmi kami.",
+            parse_mode='html'
+        )
+        
+    s = await event.get_sender()
+    n = s.first_name if s.first_name else "User"
+    u = s.username if s.username else "tidak_ada"
+    q_idx = tagall_queue.qsize()
+    
+    await tagall_queue.put({
+        'p': event.sender_id, 't': event.text, 'm': v_link, 'pt': v_name, 'n': n, 'u': u,
+        'bot': v_bot, 'ch': v_ch, 'pj1': v_pj1, 'pj2': v_pj2
+    })
+    
     if is_processing:
-        await event.respond(f"⏳ **ANTREAN DITERIMA**\n\n> Permintaan Anda berada di antrean ke-{queue_position}.")
+        await event.respond(
+            f"{E_TIME} <b>ANTREAN DITERIMA</b>\n\n"
+            f"&gt; {E_CAL} Permintaan Anda telah dimasukkan ke dalam barisan antrean nomor ke-<b>{q_idx + 1}</b>.",
+            parse_mode='html'
+        )
     else:
-        # Set the flag before creating the task so parallel incoming messages cannot start a second worker.
-        is_processing = True
-        await event.respond("✅ **TERVERIFIKASI!**\n\n> Link valid! Memulai bot tagall...")
+        await event.respond(
+            f"{E_SPARKLE} <b>TERVERIFIKASI!</b>\n\n"
+            f"&gt; {E_ARROW} Link valid! Memulai bot tagall...",
+            parse_mode='html'
+        )
         asyncio.create_task(process_queue())
 
-
-bot.loop.create_task(init_bot_commands())
 bot.run_until_disconnected()
