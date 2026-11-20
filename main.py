@@ -11,8 +11,8 @@ try:
     TARGET_GROUP_ID = int(os.environ.get("TARGET_GROUP_ID"))
     LOG_GROUP_ID = int(os.environ.get("LOG_GROUP_ID"))
     LOG_TOPIC_ID = int(os.environ.get("LOG_TOPIC_ID", 0))
-    OWNER_USERNAME = os.environ.get("OWNER_USERNAME", "admin")
     PUBLIC_GROUP_LINK = os.environ.get("PUBLIC_GROUP_LINK", "").strip()
+    OWNER_USERNAME = os.environ.get("OWNER_USERNAME", "admin")
 except (TypeError, ValueError):
     print("❌ ERROR: Periksa kembali variabel di Railway!")
     exit(1)
@@ -41,64 +41,88 @@ PREM_MENTION_EMOJIS = [
     E_TIME,
     E_CLOVER,
     E_CAL,
-    E_BOT,
+    E_BOT
 ]
 
+def get_topic_reply_id(event):
+    if event.is_private:
+        return None
+    if getattr(event.message, 'reply_to', None):
+        r = event.message.reply_to
+        if getattr(r, 'forum_topic', False):
+            return getattr(r, 'reply_to_top_id', None) or getattr(r, 'reply_to_msg_id', None)
+        if getattr(r, 'reply_to_top_id', None):
+            return r.reply_to_top_id
+    return LOG_TOPIC_ID if LOG_TOPIC_ID > 0 else None
+
 async def reply_in_topic(event, text, **kwargs):
-    if event.chat_id == LOG_GROUP_ID:
-        topic_id = event.reply_to_msg_id or (LOG_TOPIC_ID if LOG_TOPIC_ID > 0 else event.id)
+    topic_id = get_topic_reply_id(event)
+    if topic_id:
         return await bot.send_message(event.chat_id, text, reply_to=topic_id, **kwargs)
     return await event.respond(text, **kwargs)
 
-async def get_public_group_info():
-    target = PUBLIC_GROUP_LINK if PUBLIC_GROUP_LINK else TARGET_GROUP_ID
-    try:
-        entity = await bot.get_entity(target)
-        if PUBLIC_GROUP_LINK:
-            url = PUBLIC_GROUP_LINK if PUBLIC_GROUP_LINK.startswith("http") else f"https://t.me/{PUBLIC_GROUP_LINK.lstrip('@')}"
-        elif getattr(entity, 'username', None):
+async def get_public_group_entity_and_url():
+    target_entity = PUBLIC_GROUP_LINK if PUBLIC_GROUP_LINK else TARGET_GROUP_ID
+    entity = await bot.get_entity(target_entity)
+    url = PUBLIC_GROUP_LINK
+    if not url:
+        if getattr(entity, 'username', None):
             url = f"https://t.me/{entity.username}"
         else:
-            url = ""
-        return entity, url
-    except Exception:
-        url = ""
-        if PUBLIC_GROUP_LINK:
-            url = PUBLIC_GROUP_LINK if PUBLIC_GROUP_LINK.startswith("http") else f"https://t.me/{PUBLIC_GROUP_LINK.lstrip('@')}"
-        return target, url
+            try:
+                from telethon.tl.functions.messages import ExportChatInviteRequest
+                invite = await bot(ExportChatInviteRequest(entity))
+                url = invite.link
+            except:
+                url = "https://t.me/"
+    elif url.startswith("@"):
+        url = f"https://t.me/{url.lstrip('@')}"
+    elif not url.startswith("http"):
+        url = f"https://{url}"
+    return entity, url
 
 async def check_user_joined(user_id):
     if user_id == OWNER_ID:
         return True, ""
-    entity, url = await get_public_group_info()
     try:
+        entity, url = await get_public_group_entity_and_url()
         perms = await bot.get_permissions(entity, user_id)
-        if perms and not getattr(perms, 'is_banned', False):
-            return True, url
-        return False, url
+        if getattr(perms, 'is_banned', False):
+            return False, url
+        return True, url
     except UserNotParticipantError:
+        _, url = await get_public_group_entity_and_url()
         return False, url
     except Exception:
+        try:
+            _, url = await get_public_group_entity_and_url()
+        except:
+            url = PUBLIC_GROUP_LINK if PUBLIC_GROUP_LINK else "https://t.me/"
         return False, url
 
 def build_log_start(a, b, c, d, e, f):
-    clean_f = html.escape(f).replace('\n', '\n&gt; ')
+    safe_a = html.escape(str(a))
+    safe_b = html.escape(str(b))
+    safe_e = html.escape(str(e))
+    clean_f = html.escape(str(f)).replace('\n', '\n&gt; ')
     res = (
-        f"&gt; {E_BOT} <b>USER :</b> @{html.escape(b)}\n"
+        f"&gt; {E_BOT} <b>USER :</b> @{safe_b}\n"
         f"&gt; {E_CARD} <b>USER ID :</b> <code>{c}</code>\n"
         f"&gt; {E_TIME} <b>DURASI :</b> 5m\n"
         f"&gt; {E_CAL} <b>WAKTU :</b> {d}\n"
-        f"&gt; {E_CLOVER} <b>PARTNER :</b> {html.escape(e)}\n\n"
+        f"&gt; {E_CLOVER} <b>PARTNER :</b> {safe_e}\n\n"
         f"&gt; {E_SPARKLE} <b>TEKS TAGALL :</b>\n"
         f"&gt; {clean_f}"
     )
     return res
 
 def build_log_done(a, b, c, d, e):
-    clean_e = html.escape(e).replace('\n', '\n&gt; ')
+    safe_a = html.escape(str(a))
+    safe_b = html.escape(str(b))
+    clean_e = html.escape(str(e)).replace('\n', '\n&gt; ')
     res = (
-        f"&gt; {E_BOT} <b>PENGIRIM :</b> {html.escape(a)}\n"
-        f"&gt; {E_ARROW} <b>LINK :</b> {html.escape(b)}\n"
+        f"&gt; {E_BOT} <b>PENGIRIM :</b> {safe_a}\n"
+        f"&gt; {E_ARROW} <b>LINK :</b> {safe_b}\n"
         f"&gt; {E_SPARKLE} <b>STATUS :</b> {c}\n"
         f"&gt; {E_CAL} <b>WAKTU SELESAI :</b> {d}\n\n"
         f"&gt; <b>PESAN TERAKHIR :</b>\n"
@@ -107,12 +131,15 @@ def build_log_done(a, b, c, d, e):
     return res
 
 def build_struk(sender_name, partner_name, link, member_count, pj1, pj2, bot_name, ch_link):
+    safe_sender = html.escape(str(sender_name))
+    safe_partner = html.escape(str(partner_name).upper())
+    safe_link = html.escape(str(link))
     res = (
         f"{E_SPARKLE} ✅ <b>Tagall selesai!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"{E_BOT} Pengirim: <b>{html.escape(sender_name)}</b>\n"
-        f"{E_CLOVER} Partner: <b>{html.escape(partner_name.upper())}</b>\n"
-        f"{E_ARROW} Link: {html.escape(link)}\n"
+        f"{E_BOT} Pengirim: <b>{safe_sender}</b>\n"
+        f"{E_CLOVER} Partner: <b>{safe_partner}</b>\n"
+        f"{E_ARROW} Link: {safe_link}\n"
         f"{E_CARD} Member di-tag: <code>{member_count}</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"{E_SPARKLE} <b>Jangan lupa SS hasil tagall-nya!</b>"
@@ -122,12 +149,12 @@ def build_struk(sender_name, partner_name, link, member_count, pj1, pj2, bot_nam
 def load_partners():
     if os.path.exists(FILE_DB):
         try:
-            with open(FILE_DB, "r") as f: return json.load(f)
+            with open(FILE_DB, "r", encoding="utf-8") as f: return json.load(f)
         except: return {}
     return {}
 
 def save_partners(data):
-    with open(FILE_DB, "w") as f: json.dump(data, f, indent=4)
+    with open(FILE_DB, "w", encoding="utf-8") as f: json.dump(data, f, indent=4)
 
 PARTNERS_DICT = load_partners()
 print("⚡ Bot Siap!")
@@ -151,7 +178,6 @@ async def start_command(event):
 @bot.on(events.NewMessage(pattern=r'(?i)^/menu'))
 async def menu_command(event):
     if not event.is_private and event.chat_id != LOG_GROUP_ID: return
-    if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID: return
     commands_text = (
         f"{E_BOT} <b>DAFTAR PERINTAH BOT TAGALL</b>\n\n"
         f"{E_SPARKLE} <b>Perintah Umum (PM Bot):</b>\n"
@@ -183,7 +209,7 @@ async def backup_command(event):
             parse_mode='html'
         )
     except Exception as e:
-        await reply_in_topic(event, f"❌ Gagal mengirim file backup: <code>{e}</code>", parse_mode='html')
+        await reply_in_topic(event, f"❌ Gagal mengirim file backup: <code>{html.escape(str(e))}</code>", parse_mode='html')
 
 # FITUR RESTORE DATABASE
 @bot.on(events.NewMessage(pattern=r'(?i)^/restore'))
@@ -194,7 +220,7 @@ async def restore_command(event):
     
     reply = await event.get_reply_message()
     if not reply or not reply.file:
-        return await reply_in_topic(event, "⚠️ <b>Mohon reply (balas) file dokumen backup <code>.json</code></b> yang ingin direstore menggunakan perintah <code>/restore</code>.", parse_mode='html')
+        return await reply_in_topic(event, f"⚠️ <b>Mohon reply (balas) file dokumen backup <code>.json</code></b> yang ingin direstore menggunakan perintah <code>/restore</code>.", parse_mode='html')
     
     if not reply.file.name or not reply.file.name.endswith('.json'):
         return await reply_in_topic(event, "⚠️ File yang direply bukan format <code>.json</code> yang valid!", parse_mode='html')
@@ -225,7 +251,7 @@ async def restore_command(event):
         )
     except Exception as e:
         if os.path.exists(download_path): os.remove(download_path)
-        await reply_in_topic(event, f"❌ Gagal memproses restore database: <code>{e}</code>", parse_mode='html')
+        await reply_in_topic(event, f"❌ Gagal memproses restore database: <code>{html.escape(str(e))}</code>", parse_mode='html')
 
 @bot.on(events.CallbackQuery(pattern=r'^menu_.*'))
 async def callback_menu(event):
@@ -233,23 +259,24 @@ async def callback_menu(event):
     if data == "menu_tagall":
         text = (
             f"{E_ARROW} <b>Cara Memulai Tagall:</b>\n\n"
-            f"&gt; {E_CLOVER} Pastikan Anda sudah bergabung di grup publik utama kami.\n"
+            f"&gt; {E_CLOVER} Pastikan Anda sudah bergabung ke grup publik resmi kami.\n"
             f"&gt; {E_SPARKLE} Kirimkan pesan teks yang berisi <b>Link Partner/Grup</b> yang sudah terdaftar secara resmi di bot ini.\n"
-            f"&gt; {E_TIME} Bot akan otomatis memverifikasi keanggotaan serta link Anda lalu memasukkannya ke antrian."
+            "&gt;\n"
+            f"&gt; {E_TIME} Bot akan otomatis memverifikasi keanggotaan serta link tersebut, lalu memasukkan pesanan Anda ke dalam antrian."
         )
     elif data == "menu_mitra":
         text = (
             f"{E_CLOVER} <b>Pengajuan Kemitraan (PT-an):</b>\n\n"
             "&gt; Untuk mendaftarkan grup Anda sebagai partner resmi, silakan hubungi owner bot melalui username di bawah ini:\n"
             "&gt;\n"
-            f"&gt; {E_BOT} <b>Owner:</b> @{OWNER_USERNAME}\n"
+            f"&gt; {E_BOT} <b>Owner:</b> @{html.escape(OWNER_USERNAME)}\n"
             "&gt;\n"
             f"&gt; {E_CARD} Kirimkan format pendaftaran kepada admin agar link Anda terdata di database sistem."
         )
     elif data == "menu_info":
         text = (
             f"{E_SPARKLE} <b>Informasi Bot &amp; Aturan:</b>\n\n"
-            f"&gt; {E_CLOVER} Pengguna wajib bergabung ke grup publik utama sebelum memakai fitur tagall.\n"
+            f"&gt; {E_CLOVER} Pengguna wajib bergabung ke grup publik sebelum menggunakan layanan tagall.\n"
             f"&gt; {E_BOT} Bot ini berjalan otomatis menggunakan sistem antrian (Queue).\n"
             f"&gt; {E_TIME} Setiap sesi tagall dibatasi durasi maksimal 5 menit demi keamanan grup.\n"
             f"&gt; {E_CAL} Pesan tagall sampah akan otomatis dibersihkan secara berkala oleh bot."
@@ -263,18 +290,20 @@ async def callback_menu(event):
         return
     await event.edit(text, buttons=[[Button.inline("🔙 Kembali", data="menu_back")]], parse_mode='html')
 
-@bot.on(events.CallbackQuery(pattern=r'^fsub_check$'))
-async def callback_fsub_check(event):
+@bot.on(events.CallbackQuery(pattern=r'^fsub_recheck$'))
+async def callback_fsub_recheck(event):
     joined, _ = await check_user_joined(event.sender_id)
     if joined:
-        await event.answer("✅ Terverifikasi! Anda sudah bergabung. Silakan kirim ulang link partner Anda.", alert=True)
+        await event.answer("✅ Terverifikasi! Anda sudah bergabung di grup. Silakan kirim ulang teks tagall Anda.", alert=True)
         await event.edit(
-            f"{E_SPARKLE} <b>VERIFIKASI BERHASIL!</b>\n\n"
-            f"&gt; {E_ARROW} Terima kasih sudah bergabung di grup kami. Silakan kirim ulang pesan berisi <b>Link Partner</b> Anda untuk memulai tagall.",
+            f"{E_SPARKLE} <b>VERIFIKASI KEANGGOTAAN BERHASIL!</b>\n\n"
+            f"&gt; {E_ARROW} Akun Anda sudah terdata di grup publik.\n"
+            f"&gt; {E_CLOVER} Silakan kirimkan kembali teks berisi <b>Link Partner</b> Anda sekarang untuk memulai tagall.",
+            buttons=None,
             parse_mode='html'
         )
     else:
-        await event.answer("⚠️ Anda belum bergabung ke grup! Silakan klik tombol Join Grup terlebih dahulu.", alert=True)
+        await event.answer("❌ Anda belum terdeteksi bergabung di grup publik! Silakan klik tombol Join Grup terlebih dahulu.", alert=True)
 
 @bot.on(events.NewMessage(pattern=r'(?i)^/cancel'))
 async def cancel_command(event):
@@ -314,7 +343,7 @@ def build_partner_page(page=1):
     
     for i, l in enumerate(page_keys, start=start_idx + 1):
         p_data = PARTNERS_DICT[l]
-        n = p_data.get("nama", "Tanpa Nama") if isinstance(p_data, dict) else p_data
+        n = p_data.get("nama", "Tanpa Nama") if isinstance(p_data, dict) else str(p_data)
         buttons.append([Button.inline(f"{i}. {n.upper()}", data=f"pt_manage_{i-1}")])
         
     nav_row = []
@@ -348,7 +377,7 @@ async def callback_pt_page(event):
     if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID:
         return await event.answer("⚠️ Tidak ada akses!", alert=True)
     parts = event.data.decode().split('_')
-    data = parts
+    data = parts[2]
     if data == "noop": return await event.answer()
     page = int(data)
     txt, buttons = build_partner_page(page)
@@ -365,22 +394,22 @@ async def callback_manage_partner(event):
     if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID:
         return await event.answer("⚠️ Tidak ada akses!", alert=True)
     parts = event.data.decode().split('_')
-    idx = int(parts)
+    idx = int(parts[2])
     keys = list(PARTNERS_DICT.keys())
     if 0 <= idx < len(keys):
         l = keys[idx]
         pd = PARTNERS_DICT[l]
         if not isinstance(pd, dict):
-            pd = {"nama": pd, "bot": "-", "ch": "-", "pj1": "-", "pj2": "-"}
+            pd = {"nama": str(pd), "bot": "-", "ch": "-", "pj1": "-", "pj2": "-"}
             
         txt = (
             f"{E_SPARKLE} <b>PILIH BAGIAN YANG INGIN DIUBAH:</b>\n\n"
-            f"&gt; {E_CLOVER} <b>Nama GC :</b> {html.escape(pd.get('nama', '-'))}\n"
-            f"&gt; {E_ARROW} <b>Link GC :</b> {html.escape(l)}\n"
-            f"&gt; {E_BOT} <b>Nama Bot :</b> {html.escape(pd.get('bot', '-'))}\n"
-            f"&gt; {E_CARD} <b>Link CH :</b> {html.escape(pd.get('ch', '-'))}\n"
-            f"&gt; 👮 <b>PJ 1 :</b> {html.escape(pd.get('pj1', '-'))}\n"
-            f"&gt; 👮 <b>PJ 2 :</b> {html.escape(pd.get('pj2', '-'))}"
+            f"&gt; {E_CLOVER} <b>Nama GC :</b> {html.escape(str(pd.get('nama', '-')))}\n"
+            f"&gt; {E_ARROW} <b>Link GC :</b> {html.escape(str(l))}\n"
+            f"&gt; {E_BOT} <b>Nama Bot :</b> {html.escape(str(pd.get('bot', '-')))}\n"
+            f"&gt; {E_CARD} <b>Link CH :</b> {html.escape(str(pd.get('ch', '-')))}\n"
+            f"&gt; 👮 <b>PJ 1 :</b> {html.escape(str(pd.get('pj1', '-')))}\n"
+            f"&gt; 👮 <b>PJ 2 :</b> {html.escape(str(pd.get('pj2', '-')))}"
         )
         buttons = [
             [Button.inline("👆 Edit Nama GC", data=f"pt_edit_nama_{idx}"), Button.inline("👆 Edit Link GC", data=f"pt_edit_link_{idx}")],
@@ -390,6 +419,8 @@ async def callback_manage_partner(event):
             [Button.inline("🔴 Tutup Panel", data="panel_close")]
         ]
         await event.edit(txt, buttons=buttons, link_preview=False, parse_mode='html')
+    else:
+        await event.answer("⚠️ Data partner tidak ditemukan!", alert=True)
 
 @bot.on(events.CallbackQuery(pattern=r'^pt_back_list$'))
 async def callback_pt_back_list(event):
@@ -403,15 +434,15 @@ async def callback_delconf_partner(event):
     if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID:
         return await event.answer("⚠️ Tidak ada akses!", alert=True)
     parts = event.data.decode().split('_')
-    idx = int(parts)
+    idx = int(parts[2])
     keys = list(PARTNERS_DICT.keys())
     if 0 <= idx < len(keys):
         l = keys[idx]
         p_data = PARTNERS_DICT[l]
-        n = p_data.get("nama", p_data) if isinstance(p_data, dict) else p_data
+        n = p_data.get("nama", p_data) if isinstance(p_data, dict) else str(p_data)
         txt = (
             "⚠️ <b>KONFIRMASI PENGHAPUSAN</b>\n\n"
-            f"&gt; Apakah Anda yakin ingin menghapus partner '<b>{html.escape(n.upper())}</b>' dari database secara permanen?"
+            f"&gt; Apakah Anda yakin ingin menghapus partner '<b>{html.escape(str(n).upper())}</b>' dari database secara permanen?"
         )
         buttons = [
             [Button.inline("✅ Ya, Hapus", data=f"pt_delfinal_{idx}")],
@@ -425,7 +456,7 @@ async def callback_delfinal_partner(event):
     if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID:
         return await event.answer("⚠️ Tidak ada akses!", alert=True)
     parts = event.data.decode().split('_')
-    idx = int(parts)
+    idx = int(parts[2])
     keys = list(PARTNERS_DICT.keys())
     if 0 <= idx < len(keys):
         removed_name = PARTNERS_DICT[keys[idx]]
@@ -433,7 +464,7 @@ async def callback_delfinal_partner(event):
             removed_name = removed_name.get("nama", "Tanpa Nama")
         del PARTNERS_DICT[keys[idx]]
         save_partners(PARTNERS_DICT)
-        await event.answer(f"🗑️ {removed_name.upper()} Berhasil Dihapus!", alert=True)
+        await event.answer(f"🗑️ {str(removed_name).upper()} Berhasil Dihapus!", alert=True)
     txt, buttons = build_partner_page(1)
     await event.edit(txt, buttons=buttons, link_preview=False, parse_mode='html')
 
@@ -442,10 +473,19 @@ async def callback_trigger_edit(event):
     if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID:
         return await event.answer("⚠️ Tidak ada akses!", alert=True)
     parts = event.data.decode().split('_')
-    tipe = parts
-    idx = int(parts)
+    tipe = parts[2]
+    idx = int(parts[3])
     
-    add_pt_state[event.sender_id] = {"step": f"edit_{tipe}", "idx": idx}
+    msg = await event.get_message()
+    topic_id = None
+    if not event.is_private and msg:
+        if getattr(msg, 'reply_to', None):
+            r = msg.reply_to
+            topic_id = getattr(r, 'reply_to_top_id', None) or getattr(r, 'reply_to_msg_id', None)
+        if not topic_id and LOG_TOPIC_ID > 0:
+            topic_id = LOG_TOPIC_ID
+
+    add_pt_state[event.sender_id] = {"step": f"edit_{tipe}", "idx": idx, "topic_id": topic_id}
     
     field_labels = {
         'nama': 'Nama Grup (GC) baru',
@@ -461,9 +501,7 @@ async def callback_trigger_edit(event):
         f"&gt; {E_ARROW} Silakan kirimkan data <b>{field_labels[tipe]}</b> melalui pesan chat untuk memperbarui partner ini.\n"
         f"&gt; <i>Ketik /cancel jika ingin membatalkan.</i>"
     )
-    msg = await event.get_message()
-    if event.chat_id == LOG_GROUP_ID and msg:
-        topic_id = msg.reply_to_msg_id or (LOG_TOPIC_ID if LOG_TOPIC_ID > 0 else msg.id)
+    if topic_id:
         await bot.send_message(event.chat_id, txt, reply_to=topic_id, parse_mode='html')
     else:
         await event.respond(txt, parse_mode='html')
@@ -473,15 +511,22 @@ async def callback_trigger_edit(event):
 async def callback_add_start(event):
     if event.sender_id != OWNER_ID and event.chat_id != LOG_GROUP_ID:
         return await event.answer("⚠️ Tidak ada akses!", alert=True)
-    add_pt_state[event.sender_id] = {"step": "input_nama"}
+    msg = await event.get_message()
+    topic_id = None
+    if not event.is_private and msg:
+        if getattr(msg, 'reply_to', None):
+            r = msg.reply_to
+            topic_id = getattr(r, 'reply_to_top_id', None) or getattr(r, 'reply_to_msg_id', None)
+        if not topic_id and LOG_TOPIC_ID > 0:
+            topic_id = LOG_TOPIC_ID
+
+    add_pt_state[event.sender_id] = {"step": "input_nama", "topic_id": topic_id}
     txt = (
         f"{E_CLOVER} <b>TAMBAH PARTNER BARU (TAHAP 1/6)</b>\n\n"
         f"&gt; {E_ARROW} Silakan masukkan <b>Nama Partner (PT / Nama GC)</b>:\n"
         "&gt; <i>Ketik /cancel jika ingin membatalkan.</i>"
     )
-    msg = await event.get_message()
-    if event.chat_id == LOG_GROUP_ID and msg:
-        topic_id = msg.reply_to_msg_id or (LOG_TOPIC_ID if LOG_TOPIC_ID > 0 else msg.id)
+    if topic_id:
         await bot.send_message(event.chat_id, txt, reply_to=topic_id, parse_mode='html')
     else:
         await event.respond(txt, parse_mode='html')
@@ -500,6 +545,13 @@ async def handle_multistep_input(event):
     
     state = add_pt_state[user_id]
     step = state.get("step")
+    topic_id = state.get("topic_id")
+
+    async def send_step_reply(text_msg):
+        if not event.is_private and topic_id:
+            await bot.send_message(event.chat_id, text_msg, reply_to=topic_id, parse_mode='html')
+        else:
+            await event.respond(text_msg, parse_mode='html')
     
     if step == "input_nama":
         state["nama"] = user_text
@@ -508,20 +560,20 @@ async def handle_multistep_input(event):
             f"{E_CLOVER} <b>TAMBAH PARTNER BARU (TAHAP 2/6)</b>\n\n"
             f"&gt; {E_ARROW} Masukkan <b>Link Partner (Link GC)</b> berawalan http atau t.me:"
         )
-        await reply_in_topic(event, txt, parse_mode='html')
+        await send_step_reply(txt)
         
     elif step == "input_link":
         if not user_text.startswith(("http", "t.me")):
-            return await reply_in_topic(event, "&gt; ⚠️ Link tidak valid! Harus diawali http atau t.me. Silakan kirim ulang:", parse_mode='html')
+            return await send_step_reply("&gt; ⚠️ Link tidak valid! Harus diawali http atau t.me. Silakan kirim ulang:")
         if user_text in PARTNERS_DICT:
-            return await reply_in_topic(event, "&gt; ⚠️ Link tersebut sudah terdaftar! Silakan kirim link lain:", parse_mode='html')
+            return await send_step_reply("&gt; ⚠️ Link tersebut sudah terdaftar! Silakan kirim link lain:")
         state["link"] = user_text
         state["step"] = "input_bot"
         txt = (
             f"{E_CLOVER} <b>TAMBAH PARTNER BARU (TAHAP 3/6)</b>\n\n"
             f"&gt; {E_BOT} Masukkan <b>Nama Bot</b> pendukung:"
         )
-        await reply_in_topic(event, txt, parse_mode='html')
+        await send_step_reply(txt)
         
     elif step == "input_bot":
         state["bot"] = user_text
@@ -530,7 +582,7 @@ async def handle_multistep_input(event):
             f"{E_CLOVER} <b>TAMBAH PARTNER BARU (TAHAP 4/6)</b>\n\n"
             f"&gt; {E_CARD} Masukkan <b>Link Channel (CH)</b>:"
         )
-        await reply_in_topic(event, txt, parse_mode='html')
+        await send_step_reply(txt)
         
     elif step == "input_ch":
         state["ch"] = user_text
@@ -539,7 +591,7 @@ async def handle_multistep_input(event):
             f"{E_CLOVER} <b>TAMBAH PARTNER BARU (TAHAP 5/6)</b>\n\n"
             "&gt; 👮 Masukkan Username <b>Penanggung Jawab 1 (PJ 1)</b>:"
         )
-        await reply_in_topic(event, txt, parse_mode='html')
+        await send_step_reply(txt)
         
     elif step == "input_pj1":
         state["pj1"] = user_text
@@ -548,7 +600,7 @@ async def handle_multistep_input(event):
             f"{E_CLOVER} <b>TAMBAH PARTNER BARU (TAHAP 6/6 - TERAKHIR)</b>\n\n"
             "&gt; 👮 Masukkan Username <b>Penanggung Jawab 2 (PJ 2)</b>:"
         )
-        await reply_in_topic(event, txt, parse_mode='html')
+        await send_step_reply(txt)
         
     elif step == "input_pj2":
         state["pj2"] = user_text
@@ -573,11 +625,11 @@ async def handle_multistep_input(event):
             f"&gt; 👮 <b>PJ 2 :</b> {html.escape(state['pj2'])}\n\n"
             f"Silakan panggil kembali <code>/lpt</code> untuk melihat list."
         )
-        await reply_in_topic(event, txt_done, parse_mode='html')
+        await send_step_reply(txt_done)
 
     elif step.startswith("edit_"):
         parts = step.split("_")
-        tipe = parts
+        tipe = parts[1]
         idx = state["idx"]
         keys = list(PARTNERS_DICT.keys())
         
@@ -586,13 +638,13 @@ async def handle_multistep_input(event):
             old_data = PARTNERS_DICT[old_link]
             
             if not isinstance(old_data, dict):
-                old_data = {"nama": old_data, "bot": "-", "ch": "-", "pj1": "-", "pj2": "-"}
+                old_data = {"nama": str(old_data), "bot": "-", "ch": "-", "pj1": "-", "pj2": "-"}
                 
             if tipe == "link":
                 if not user_text.startswith(("http", "t.me")):
-                    return await reply_in_topic(event, "&gt; ⚠️ Link tidak valid! Harus diawali http atau t.me. Silakan kirim ulang:", parse_mode='html')
+                    return await send_step_reply("&gt; ⚠️ Link tidak valid! Harus diawali http atau t.me. Silakan kirim ulang:")
                 if user_text != old_link and user_text in PARTNERS_DICT:
-                    return await reply_in_topic(event, "&gt; ⚠️ Link tersebut sudah terdaftar! Silakan kirim link lain:", parse_mode='html')
+                    return await send_step_reply("&gt; ⚠️ Link tersebut sudah terdaftar! Silakan kirim link lain:")
                 del PARTNERS_DICT[old_link]
                 PARTNERS_DICT[user_text] = old_data
             else:
@@ -606,7 +658,10 @@ async def handle_multistep_input(event):
                 f"{E_SPARKLE} <b>PERUBAHAN BERHASIL DISIMPAN!</b>\n\n"
                 f"&gt; {E_CARD} Data <b>{tipe.upper()}</b> berhasil dimodifikasi. Silakan panggil ulang perintah <code>/lpt</code> untuk melihat pembaruan."
             )
-            await reply_in_topic(event, txt_success, parse_mode='html')
+            await send_step_reply(txt_success)
+        else:
+            del add_pt_state[user_id]
+            await send_step_reply("⚠️ Data partner tidak ditemukan (mungkin sudah terhapus). Silakan panggil ulang <code>/lpt</code>.")
 
 @bot.on(events.NewMessage(pattern=r'(?i)^/end'))
 async def end_tagall(event):
@@ -621,7 +676,8 @@ async def end_tagall(event):
 async def process_queue():
     global is_processing, stop_current_tagall
     is_processing = True
-    topic_target = LOG_TOPIC_ID if LOG_TOPIC_ID > 0 else None
+    log_topic = LOG_TOPIC_ID if LOG_TOPIC_ID > 0 else None
+
     while not tagall_queue.empty():
         task = await tagall_queue.get()
         pemicu, teks, mitra, nama_pt, nama, user = task['p'], task['t'], task['m'], task['pt'], task['n'], task['u']
@@ -635,7 +691,12 @@ async def process_queue():
         first_tag_id = None
         try:
             chat = await bot.get_entity(TARGET_GROUP_ID)
-            i_msg = await bot.send_message(TARGET_GROUP_ID, f"{E_SPARKLE} <b>TAGALL DIMULAI</b>\n{E_BOT} <b>GROUP:</b> {html.escape(chat.title)}", link_preview=False, parse_mode='html')
+            i_msg = await bot.send_message(
+                TARGET_GROUP_ID,
+                f"{E_SPARKLE} <b>TAGALL DIMULAI</b> {E_SPARKLE}\n{E_BOT} <b>GROUP:</b> {html.escape(chat.title)}",
+                link_preview=False,
+                parse_mode='html'
+            )
             ids = [i_msg.id]
             first_tag_id = i_msg.id
         except:
@@ -645,15 +706,15 @@ async def process_queue():
         w_start = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_start = build_log_start(nama, user, pemicu, w_start, mitra, teks)
         try:
-            await bot.send_message(LOG_GROUP_ID, log_start, parse_mode='html', link_preview=False, reply_to=topic_target)
+            await bot.send_message(LOG_GROUP_ID, log_start, parse_mode='html', link_preview=False, reply_to=log_topic)
         except: pass
         
         mentions = []
         try:
             async for u in bot.iter_participants(TARGET_GROUP_ID):
                 if not u.bot:
-                    emoji_prem = random.choice(PREM_MENTION_EMOJIS)
-                    mentions.append(f'<a href="tg://user?id={u.id}">{emoji_prem}</a>')
+                    p_emoji = random.choice(PREM_MENTION_EMOJIS)
+                    mentions.append(f'<a href="tg://user?id={u.id}">{p_emoji}</a>')
         except: pass
         
         if not mentions:
@@ -665,8 +726,12 @@ async def process_queue():
         l_sent = False
         w_habis = False
         
-        safe_teks = html.escape(teks)
-        tag_header = f"{E_SPARKLE} <b>INFO PARTNER ({html.escape(nama_pt.upper())})</b> {E_CLOVER}\n{E_ARROW} {safe_teks}"
+        escaped_teks = html.escape(teks)
+        safe_pt = html.escape(nama_pt.upper())
+        tagall_header = (
+            f"{E_SPARKLE} <b>INFO PARTNER ({safe_pt})</b> {E_CLOVER}\n"
+            f"{E_ARROW} {escaped_teks}\n\n"
+        )
         
         for chunk in chunks:
             if stop_current_tagall:
@@ -676,12 +741,22 @@ async def process_queue():
                 w_habis = True
                 break
             try:
-                m_tag = await bot.send_message(TARGET_GROUP_ID, f"{tag_header}\n\n" + " ".join(chunk), parse_mode='html', link_preview=False)
+                m_tag = await bot.send_message(
+                    TARGET_GROUP_ID,
+                    tagall_header + " ".join(chunk),
+                    parse_mode='html',
+                    link_preview=False
+                )
                 ids.append(m_tag.id)
             except FloodWaitError as e:
                 await asyncio.sleep(e.seconds + 1)
                 try:
-                    m_tag = await bot.send_message(TARGET_GROUP_ID, f"{tag_header}\n\n" + " ".join(chunk), parse_mode='html', link_preview=False)
+                    m_tag = await bot.send_message(
+                        TARGET_GROUP_ID,
+                        tagall_header + " ".join(chunk),
+                        parse_mode='html',
+                        link_preview=False
+                    )
                     ids.append(m_tag.id)
                 except: pass
             except: pass
@@ -697,14 +772,18 @@ async def process_queue():
         t_txt = "Dihentikan Paksa (/end)" if stop_current_tagall else ("Selesai (Limit 5m)" if w_habis else "Selesai")
         
         try:
-            s_msg = await bot.send_message(TARGET_GROUP_ID, f"{E_SPARKLE} <b>{t_txt}!</b> {E_TIME} Pesan sampah dihapus dalam 5 menit...", parse_mode='html')
+            s_msg = await bot.send_message(
+                TARGET_GROUP_ID,
+                f"{E_SPARKLE} <b>{t_txt}!</b> {E_TIME} Pesan sampah dihapus dalam 5 menit...",
+                parse_mode='html'
+            )
             ids.append(s_msg.id)
         except: pass
         
         w_end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_done = build_log_done(nama, mitra, t_txt, w_end, teks)
         try:
-            await bot.send_message(LOG_GROUP_ID, log_done, parse_mode='html', link_preview=False, reply_to=topic_target)
+            await bot.send_message(LOG_GROUP_ID, log_done, parse_mode='html', link_preview=False, reply_to=log_topic)
         except: pass
         
         clean_group_id = str(TARGET_GROUP_ID).replace('-100', '')
@@ -741,18 +820,17 @@ async def handle_public_auto_tagall(event):
     urls = re.findall(r'(https?://\S+|t\.me/\S+)', event.text)
     if not urls: return
 
-    # Cek wajib join public group terlebih dahulu
+    # Cek wajib join public grup terlebih dahulu
     joined, group_url = await check_user_joined(event.sender_id)
     if not joined:
-        fsub_buttons = []
-        if group_url:
-            fsub_buttons.append([Button.url("📢 Join Grup", url=group_url)])
-        fsub_buttons.append([Button.inline("🔄 Cek Lagi (Verifikasi)", data="fsub_check")])
         return await event.respond(
-            f"{E_BOT} <b>AKSES DITOLAK (WAJIB JOIN GRUP)</b>\n\n"
-            f"&gt; {E_CLOVER} Anda harus bergabung ke grup publik kami terlebih dahulu sebelum menggunakan layanan tagall.\n"
-            f"&gt; {E_ARROW} Silakan klik tombol <b>Join Grup</b> di bawah, lalu tekan <b>Cek Lagi</b>.",
-            buttons=fsub_buttons,
+            f"{E_BOT} <b>WAJIB JOIN GRUP TERLEBIH DAHULU</b> {E_SPARKLE}\n\n"
+            f"&gt; {E_CLOVER} Maaf, untuk menggunakan layanan bot tagall, Anda diwajibkan bergabung ke grup publik resmi kami terlebih dahulu.\n"
+            f"&gt; {E_ARROW} Silakan klik tombol <b>Join Grup</b> di bawah ini, lalu tekan <b>Cek Lagi</b> atau kirim ulang pesan tagall Anda.",
+            buttons=[
+                [Button.url("📢 Join Grup", url=group_url)],
+                [Button.inline("🔄 Cek Lagi (Verifikasi)", data="fsub_recheck")]
+            ],
             parse_mode='html'
         )
 
@@ -769,7 +847,7 @@ async def handle_public_auto_tagall(event):
                 v_pj1 = pd.get('pj1', '-')
                 v_pj2 = pd.get('pj2', '-')
             else:
-                v_name = pd
+                v_name = str(pd)
                 v_bot, v_ch, v_pj1, v_pj2 = "-", "-", "-", "-"
             break
             
