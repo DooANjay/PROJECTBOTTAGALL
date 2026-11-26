@@ -1,5 +1,6 @@
 import os, asyncio, time, json, re, random, html
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from telethon import TelegramClient, events, Button
 from telethon.errors import FloodWaitError, UserNotParticipantError
 
@@ -22,6 +23,11 @@ FILE_DB = "partners_database.json"
 tagall_queue = asyncio.Queue()
 is_processing = False
 stop_current_tagall = False
+TZ = ZoneInfo("Asia/Jakarta")
+TMO_FILE = "tmo_schedule.json"
+MANUAL_TAGALL = {}
+MANUAL_TAGALL_IDS = {}
+MANUAL_TAGALL_COOLDOWN = {}
 
 add_pt_state = {}
 
@@ -151,6 +157,83 @@ def build_struk(sender_name, partner_name, link, member_count, pj1, pj2, bot_nam
     )
     return res
 
+DAY_NAMES = {
+    "senin": 0, "selasa": 1, "rabu": 2, "kamis": 3,
+    "jumat": 4, "sabtu": 5, "minggu": 6,
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3,
+    "fri": 4, "sat": 5, "sun": 6
+}
+DEFAULT_TMO = {"days": [0, 2, 3, 4], "start": "19:30", "end": "20:30"}
+
+def load_tmo_schedule():
+    if os.path.exists(TMO_FILE):
+        try:
+            with open(TMO_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data.get("days") and data.get("start") and data.get("end"):
+                return data
+        except Exception:
+            pass
+    return dict(DEFAULT_TMO)
+
+def save_tmo_schedule(data):
+    with open(TMO_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+TMO_SCHEDULE = load_tmo_schedule()
+
+CLOSE_AUTO_FILE = "tagall_close_days.json"
+DEFAULT_CLOSE_AUTO = {"days": []}
+
+def load_close_auto():
+    if os.path.exists(CLOSE_AUTO_FILE):
+        try:
+            with open(CLOSE_AUTO_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("days"), list):
+                return {"days": sorted(set(int(d) for d in data["days"] if 0 <= int(d) <= 6))}
+        except Exception:
+            pass
+    return dict(DEFAULT_CLOSE_AUTO)
+
+def save_close_auto(data):
+    with open(CLOSE_AUTO_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+CLOSE_AUTO_SCHEDULE = load_close_auto()
+
+def auto_tagall_closed(now=None):
+    now = now or datetime.now(TZ)
+    return now.weekday() in CLOSE_AUTO_SCHEDULE.get("days", [])
+
+def close_auto_days_text(days):
+    return tmo_days_text(days) if days else "Tidak ada (nonaktif)"
+
+def parse_hhmm(value):
+    return datetime.strptime(value, "%H:%M").time()
+
+def tmo_status(now=None):
+    now = now or datetime.now(TZ)
+    days = TMO_SCHEDULE.get("days", [])
+    start = parse_hhmm(TMO_SCHEDULE.get("start", "19:30"))
+    end = parse_hhmm(TMO_SCHEDULE.get("end", "20:30"))
+    if now.weekday() in days and start <= now.time() < end:
+        end_dt = now.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0)
+        return True, end_dt
+    return False, None
+
+async def wait_until_tmo_ends():
+    while True:
+        active, end_dt = tmo_status()
+        if not active:
+            return
+        seconds = max(1, (end_dt - datetime.now(TZ)).total_seconds())
+        await asyncio.sleep(min(seconds, 60))
+
+def tmo_days_text(days):
+    names = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+    return ", ".join(names[d] for d in days)
+
 def load_partners():
     if os.path.exists(FILE_DB):
         try:
@@ -193,7 +276,12 @@ async def menu_command(event):
         "&gt; <code>/backup</code> - Mengunduh file cadangan database setelan bot\n"
         "&gt; <code>/restore</code> - Membalas (reply) file database untuk memulihkan data\n"
         "&gt; <code>/cancel</code> - Membatalkan proses input/edit partner yang sedang berjalan\n"
-        "&gt; <code>/end</code> - Menghentikan paksa proses tagall yang sedang berlangsung"
+        "&gt; <code>/end</code> - Menghentikan paksa proses tagall yang sedang berlangsung\n"
+        "&gt; <code>/tmoset</code> - Melihat/mengatur jadwal TMO (contoh: /tmoset Senin,Rabu 19:30-20:30)\n"
+        "&gt; <code>/tmooff</code> - Menonaktifkan jadwal TMO\n"
+        "&gt; <code>/closeautoset</code> - Melihat/mengatur hari tagall ditutup otomatis\n"
+        "&gt; <code>/closeautooff</code> - Menonaktifkan penutupan otomatis\n"
+        "&gt; <code>/tagall</code> - Tagall manual di grup publik dengan pilihan durasi"
     )
     await reply_in_topic(event, commands_text)
 
@@ -642,11 +730,89 @@ async def end_tagall(event):
     stop_current_tagall = True
     await reply_in_topic(event, "&gt; 🛑 Menghentikan proses tagall saat ini...")
 
+@bot.on(events.NewMessage(pattern=r"(?i)^/tmoset(?:\s+(.+))?$"))
+async def tmo_set_command(event):
+    global TMO_SCHEDULE
+    if event.sender_id != OWNER_ID or (not event.is_private and event.chat_id != LOG_GROUP_ID):
+        return
+    raw = event.pattern_match.group(1)
+    if not raw:
+        return await reply_in_topic(
+            event,
+            "<b>JADWAL TMO</b>\n"
+            f"&gt; Hari: <code>{tmo_days_text(TMO_SCHEDULE['days'])}</code>\n"
+            f"&gt; Jam: <code>{TMO_SCHEDULE['start']}-{TMO_SCHEDULE['end']} WIB</code>\n\n"
+            "Format ubah: <code>/tmoset Senin,Rabu,Kamis,Jumat 19:30-20:30</code>"
+        )
+    try:
+        match = re.fullmatch(r"(.+?)\s+(\d{2}:\d{2})-(\d{2}:\d{2})", raw.strip(), re.I)
+        if not match:
+            raise ValueError
+        day_tokens = [x.strip().lower() for x in re.split(r"[,; ]+", match.group(1)) if x.strip()]
+        days = sorted(set(DAY_NAMES[x] for x in day_tokens))
+        start, end = match.group(2), match.group(3)
+        start_t, end_t = parse_hhmm(start), parse_hhmm(end)
+        if start_t >= end_t:
+            return await reply_in_topic(event, "⚠️ Jam mulai harus lebih awal dari jam selesai (jadwal melewati tengah malam belum didukung).")
+        TMO_SCHEDULE = {"days": days, "start": start, "end": end}
+        save_tmo_schedule(TMO_SCHEDULE)
+        await reply_in_topic(event, f"✅ Jadwal TMO disimpan: <b>{tmo_days_text(days)}</b>, <code>{start}-{end} WIB</code>.")
+    except (ValueError, KeyError):
+        await reply_in_topic(event, "Format salah. Contoh: <code>/tmoset Senin,Rabu,Kamis,Jumat 19:30-20:30</code>")
+
+@bot.on(events.NewMessage(pattern=r"(?i)^/tmooff$"))
+async def tmo_off_command(event):
+    global TMO_SCHEDULE
+    if event.sender_id != OWNER_ID or (not event.is_private and event.chat_id != LOG_GROUP_ID):
+        return
+    TMO_SCHEDULE = {"days": [], "start": "19:30", "end": "20:30"}
+    save_tmo_schedule(TMO_SCHEDULE)
+    await reply_in_topic(event, "✅ Jadwal TMO dinonaktifkan.")
+
+@bot.on(events.NewMessage(pattern=r"(?i)^/closeautoset(?:\s+(.+))?$"))
+async def close_auto_set_command(event):
+    global CLOSE_AUTO_SCHEDULE
+    if event.sender_id != OWNER_ID or (not event.is_private and event.chat_id != LOG_GROUP_ID):
+        return
+    raw = event.pattern_match.group(1)
+    if not raw:
+        return await reply_in_topic(
+            event,
+            "<b>JADWAL CLOSE TAGALL OTOMATIS</b>\n"
+            f"&gt; Hari ditutup: <code>{close_auto_days_text(CLOSE_AUTO_SCHEDULE['days'])}</code>\n\n"
+            "Atur hari: <code>/closeautoset Selasa,Sabtu,Minggu</code>\n"
+            "Hari tersebut semua permintaan tagall akan ditutup, bukan dimasukkan antrean."
+        )
+    try:
+        day_tokens = [x.strip().lower() for x in re.split(r"[,; ]+", raw.strip()) if x.strip()]
+        if not day_tokens:
+            raise ValueError
+        days = sorted(set(DAY_NAMES[x] for x in day_tokens))
+        CLOSE_AUTO_SCHEDULE = {"days": days}
+        save_close_auto(CLOSE_AUTO_SCHEDULE)
+        await reply_in_topic(
+            event,
+            f"✅ Close tagall otomatis aktif pada: <b>{tmo_days_text(days)}</b>.\n"
+            "Permintaan partner dan /tagall publik akan ditolak pada hari tersebut."
+        )
+    except (ValueError, KeyError):
+        await reply_in_topic(event, "Format salah. Contoh: <code>/closeautoset Selasa,Sabtu,Minggu</code>")
+
+@bot.on(events.NewMessage(pattern=r"(?i)^/closeautooff$"))
+async def close_auto_off_command(event):
+    global CLOSE_AUTO_SCHEDULE
+    if event.sender_id != OWNER_ID or (not event.is_private and event.chat_id != LOG_GROUP_ID):
+        return
+    CLOSE_AUTO_SCHEDULE = {"days": []}
+    save_close_auto(CLOSE_AUTO_SCHEDULE)
+    await reply_in_topic(event, "✅ Close tagall otomatis dinonaktifkan.")
+
 async def process_queue():
     global is_processing, stop_current_tagall
     is_processing = True
     while not tagall_queue.empty():
         task = await tagall_queue.get()
+        await wait_until_tmo_ends()
         pemicu, teks, mitra, nama_pt, nama, user = task['p'], task['t'], task['m'], task['pt'], task['n'], task['u']
         v_bot, v_ch, v_pj1, v_pj2 = task['bot'], task['ch'], task['pj1'], task['pj2']
         
@@ -696,8 +862,14 @@ async def process_queue():
         safe_teks = html.escape(teks)
         safe_pt = html.escape(nama_pt.upper())
         
+        tmo_interrupted = False
         for chunk in chunks:
             if stop_current_tagall:
+                break
+            active_tmo, _ = tmo_status()
+            if active_tmo:
+                tmo_interrupted = True
+                stop_current_tagall = True
                 break
             selisih = int(time.time() - t_start)
             if selisih not in range(0, 300):
@@ -729,7 +901,7 @@ async def process_queue():
                     l_sent = True
                 except: pass
                 
-        t_txt = "Dihentikan Paksa (/end)" if stop_current_tagall else ("Selesai (Limit 5m)" if w_habis else "Selesai")
+        t_txt = "Ditunda karena jadwal TMO" if tmo_interrupted else ("Dihentikan Paksa (/end)" if stop_current_tagall else ("Selesai (Limit 5m)" if w_habis else "Selesai"))
         
         try:
             s_msg = await bot.send_message(
@@ -763,6 +935,9 @@ async def process_queue():
         
         tagall_queue.task_done()
         asyncio.create_task(clean_delayed(ids))
+        if tmo_interrupted:
+            await tagall_queue.put(task)
+            await asyncio.sleep(1)
     is_processing = False
 
 async def clean_delayed(ids):
@@ -779,6 +954,14 @@ async def handle_public_auto_tagall(event):
     
     urls = re.findall(r'(https?://\S+|t\.me/\S+)', event.text)
     if not urls: return
+
+    if auto_tagall_closed():
+        return await event.respond(
+            "🔒 <b>TAGALL DITUTUP OTOMATIS</b>\n\n"
+            "&gt; Hari ini layanan tagall sedang ditutup sesuai jadwal.\n"
+            "&gt; Silakan ajukan kembali pada hari layanan dibuka.",
+            parse_mode='html'
+        )
 
     # Cek wajib join public grup terlebih dahulu
     is_joined = await check_user_joined(event.sender_id)
@@ -829,7 +1012,17 @@ async def handle_public_auto_tagall(event):
         'bot': v_bot, 'ch': v_ch, 'pj1': v_pj1, 'pj2': v_pj2
     })
     
-    if is_processing:
+    active_tmo, tmo_end = tmo_status()
+    if active_tmo:
+        await event.respond(
+            f"{E_TIME} <b>GC SEDANG TMO</b>\n\n"
+            f"&gt; Grup sedang TMO sampai <b>{tmo_end.strftime('%H:%M')} WIB</b>.\n"
+            f"&gt; Permintaan Anda tetap masuk antrean dan akan di-tagall setelah TMO selesai.",
+            parse_mode='html'
+        )
+        if not is_processing:
+            asyncio.create_task(process_queue())
+    elif is_processing:
         await event.respond(
             f"{E_TIME} <b>ANTREAN DITERIMA</b>\n\n"
             f"&gt; {E_CAL} Permintaan Anda telah dimasukkan ke dalam barisan antrean nomor ke-<b>{q_idx + 1}</b>.",
@@ -842,5 +1035,113 @@ async def handle_public_auto_tagall(event):
             parse_mode='html'
         )
         asyncio.create_task(process_queue())
+
+
+MANUAL_TAGALL_COOLDOWN = {}
+
+@bot.on(events.NewMessage(pattern=r"(?i)^/tagall$"))
+async def public_tagall_command(event):
+    if event.is_private or event.chat_id != TARGET_GROUP_ID:
+        return
+    if auto_tagall_closed():
+        return await event.respond("🔒 <b>TAGALL DITUTUP OTOMATIS</b>\n\n&gt; Hari ini layanan tagall sedang ditutup sesuai jadwal.", parse_mode="html")
+    now = time.time()
+    last = MANUAL_TAGALL_COOLDOWN.get(event.sender_id, 0)
+    if now - last < 60:
+        return await event.respond("⏳ Tunggu 60 detik sebelum meminta tagall manual lagi.")
+    MANUAL_TAGALL_COOLDOWN[event.sender_id] = now
+    buttons = [
+        [Button.inline("3 menit", data=f"mtag_{event.sender_id}_3"),
+         Button.inline("5 menit", data=f"mtag_{event.sender_id}_5"),
+         Button.inline("10 menit", data=f"mtag_{event.sender_id}_10")],
+        [Button.inline("15 menit", data=f"mtag_{event.sender_id}_15"),
+         Button.inline("30 menit", data=f"mtag_{event.sender_id}_30")],
+        [Button.inline("60 menit", data=f"mtag_{event.sender_id}_60"),
+         Button.inline("90 menit", data=f"mtag_{event.sender_id}_90")],
+        [Button.inline("❌ Batal", data=f"mtag_cancel_{event.sender_id}")]
+    ]
+    await event.respond(
+        "📣 <b>TAGALL MANUAL</b>\n\nPilih waktu penyimpanan pesan tagall. Pesan juga bisa dihapus lebih cepat dengan tombol hapus.",
+        buttons=buttons,
+        parse_mode="html"
+    )
+
+@bot.on(events.CallbackQuery(pattern=r"^mtag_cancel_(\d+)$"))
+async def manual_tagall_cancel(event):
+    owner_id = int(event.pattern_match.group(1))
+    if event.sender_id != owner_id:
+        return await event.answer("Tombol ini milik peminta tagall.", alert=True)
+    await event.edit("❌ Permintaan tagall manual dibatalkan.", buttons=None)
+
+@bot.on(events.CallbackQuery(pattern=r"^mtag_(\d+)_(3|5|10|15|30|60|90)$"))
+async def manual_tagall_start(event):
+    owner_id = int(event.pattern_match.group(1))
+    duration = int(event.pattern_match.group(2))
+    if event.sender_id != owner_id:
+        return await event.answer("Tombol ini milik peminta tagall.", alert=True)
+    if event.chat_id != TARGET_GROUP_ID:
+        return await event.answer("Fitur ini hanya untuk grup publik.", alert=True)
+    if auto_tagall_closed():
+        return await event.answer("Tagall sedang ditutup otomatis hari ini.", alert=True)
+    active_tmo, tmo_end = tmo_status()
+    if active_tmo:
+        return await event.answer(f"Grup sedang TMO sampai {tmo_end.strftime('%H:%M')} WIB.", alert=True)
+    await event.edit(f"📣 Tagall manual diproses. Pesan akan dihapus dalam {duration} menit.", buttons=None)
+    asyncio.create_task(run_manual_tagall(event.chat_id, owner_id, duration))
+
+async def run_manual_tagall(chat_id, owner_id, duration):
+    message_ids = []
+    try:
+        members = []
+        async for user in bot.iter_participants(chat_id):
+            if not user.bot:
+                members.append(user.id)
+        if not members:
+            return
+        for idx in range(0, len(members), 10):
+            active_tmo, _ = tmo_status()
+            if active_tmo:
+                break
+            chunk = members[idx:idx + 10]
+            text = "📣 <b>TAGALL MANUAL</b>\n\n" + " ".join(
+                f'<a href="tg://user?id={uid}">👤</a>' for uid in chunk
+            )
+            msg = await bot.send_message(chat_id, text, parse_mode="html")
+            message_ids.append(msg.id)
+            await asyncio.sleep(1.5)
+        if not message_ids:
+            return
+        control = await bot.send_message(
+            chat_id,
+            f"✅ Tagall manual terkirim. Pesan akan dibersihkan dalam {duration} menit.",
+            buttons=[[Button.inline("🗑 Hapus sekarang", data=f"mtagdel_{owner_id}_{message_ids[0]}")]],
+            parse_mode="html"
+        )
+        message_ids.append(control.id)
+        MANUAL_TAGALL_IDS[message_ids[0]] = message_ids[:]
+        await asyncio.sleep(duration * 60)
+        try:
+            await bot.delete_messages(chat_id, message_ids)
+        except Exception:
+            pass
+        MANUAL_TAGALL_IDS.pop(message_ids[0], None)
+    except FloodWaitError as e:
+        await asyncio.sleep(e.seconds + 1)
+    except Exception as e:
+        print(f"[MANUAL TAGALL] {e}")
+
+@bot.on(events.CallbackQuery(pattern=r"^mtagdel_(\d+)_(\d+)$"))
+async def manual_tagall_delete(event):
+    owner_id = int(event.pattern_match.group(1))
+    first_id = int(event.pattern_match.group(2))
+    if event.sender_id != owner_id:
+        return await event.answer("Tombol hapus ini milik peminta tagall.", alert=True)
+    try:
+        ids = MANUAL_TAGALL_IDS.pop(first_id, [first_id])
+        await bot.delete_messages(event.chat_id, ids)
+        await event.answer("Semua pesan tagall manual dihapus.")
+    except Exception:
+        await event.answer("Tidak bisa menghapus pesan ini.", alert=True)
+
 
 bot.run_until_disconnected()
