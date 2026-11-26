@@ -1043,8 +1043,6 @@ MANUAL_TAGALL_COOLDOWN = {}
 async def public_tagall_command(event):
     if event.is_private or event.chat_id != TARGET_GROUP_ID:
         return
-    if auto_tagall_closed():
-        return await event.respond("🔒 <b>TAGALL DITUTUP OTOMATIS</b>\n\n&gt; Hari ini layanan tagall sedang ditutup sesuai jadwal.", parse_mode="html")
     now = time.time()
     last = MANUAL_TAGALL_COOLDOWN.get(event.sender_id, 0)
     if now - last < 60:
@@ -1081,11 +1079,6 @@ async def manual_tagall_start(event):
         return await event.answer("Tombol ini milik peminta tagall.", alert=True)
     if event.chat_id != TARGET_GROUP_ID:
         return await event.answer("Fitur ini hanya untuk grup publik.", alert=True)
-    if auto_tagall_closed():
-        return await event.answer("Tagall sedang ditutup otomatis hari ini.", alert=True)
-    active_tmo, tmo_end = tmo_status()
-    if active_tmo:
-        return await event.answer(f"Grup sedang TMO sampai {tmo_end.strftime('%H:%M')} WIB.", alert=True)
     await event.edit(f"📣 Tagall manual diproses. Pesan akan dihapus dalam {duration} menit.", buttons=None)
     asyncio.create_task(run_manual_tagall(event.chat_id, owner_id, duration))
 
@@ -1099,9 +1092,6 @@ async def run_manual_tagall(chat_id, owner_id, duration):
         if not members:
             return
         for idx in range(0, len(members), 10):
-            active_tmo, _ = tmo_status()
-            if active_tmo:
-                break
             chunk = members[idx:idx + 10]
             text = "📣 <b>TAGALL MANUAL</b>\n\n" + " ".join(
                 f'<a href="tg://user?id={uid}">👤</a>' for uid in chunk
